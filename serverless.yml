@@ -1,0 +1,40 @@
+service: backend-proyectate
+frameworkVersion: '4'
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: us-east-1
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+            - dynamodb:Scan
+            - dynamodb:GetItem
+            - dynamodb:UpdateItem
+          Resource: "arn:aws:dynamodb:${aws:region}:*:table/ReportesTabla"
+
+resources:
+  Resources:
+    ReportesTabla:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ReportesTabla
+        AttributeDefinitions:
+          - AttributeName: reporteId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: reporteId
+            KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+
+functions:
+  crearReporte:
+    handler: handler.crearReporte
+    events:
+      - http:
+          path: reportes
+          method: post
+          cors: true
