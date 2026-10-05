@@ -8,7 +8,7 @@
       "frameworkVersion": "4",
       "provider": {
         "name": "aws",
-        "runtime": "nodejs18.x",
+        "runtime": "nodejs20.x",
         "region": "us-east-1",
         "iam": {
           "role": {
@@ -131,10 +131,10 @@
               "Properties": {
                 "Code": {
                   "S3Bucket": "serverless-framework-deployments-us-east-1-1b29d215-8306",
-                  "S3Key": "serverless/backend-proyectate/dev/1791145928771-2026-10-04T20:32:08.771Z/backend-proyectate.zip"
+                  "S3Key": "serverless/backend-proyectate/dev/1791229280639-2026-10-05T19:41:20.639Z/backend-proyectate.zip"
                 },
                 "Handler": "handler.crearReporte",
-                "Runtime": "nodejs18.x",
+                "Runtime": "nodejs20.x",
                 "FunctionName": "backend-proyectate-dev-crearReporte",
                 "MemorySize": 1024,
                 "Timeout": 6,
@@ -149,14 +149,14 @@
                 "CrearReporteLogGroup"
               ]
             },
-            "CrearReporteLambdaVersionftZdPXJbRo6UWvsR4gApvLBLOmg6L29gs2T20L7kkw": {
+            "CrearReporteLambdaVersion1ugnidtyDtsVxZUgQc7zFefs4juk5MtVNEypwaKa8": {
               "Type": "AWS::Lambda::Version",
               "DeletionPolicy": "Retain",
               "Properties": {
                 "FunctionName": {
                   "Ref": "CrearReporteLambdaFunction"
                 },
-                "CodeSha256": "0IqVHcymqueZ8J//9LMETM3wE5D4jLDbtt4e7GTSymM="
+                "CodeSha256": "jlIvts6bUOJZ8G1DGEzVcON3ACLqnGJUvD1Z/lsbaG8="
               }
             },
             "ApiGatewayRestApi": {
@@ -277,7 +277,7 @@
                 "CrearReporteLambdaPermissionApiGateway"
               ]
             },
-            "ApiGatewayDeployment1791145917066": {
+            "ApiGatewayDeployment1791229266748": {
               "Type": "AWS::ApiGateway::Deployment",
               "Properties": {
                 "RestApiId": {
@@ -357,7 +357,7 @@
             "CrearReporteLambdaFunctionQualifiedArn": {
               "Description": "Current Lambda function version",
               "Value": {
-                "Ref": "CrearReporteLambdaVersionftZdPXJbRo6UWvsR4gApvLBLOmg6L29gs2T20L7kkw"
+                "Ref": "CrearReporteLambdaVersion1ugnidtyDtsVxZUgQc7zFefs4juk5MtVNEypwaKa8"
               },
               "Export": {
                 "Name": "sls-backend-proyectate-dev-CrearReporteLambdaFunctionQualifiedArn"
@@ -450,15 +450,15 @@
           "package": {},
           "memory": 1024,
           "timeout": 6,
-          "runtime": "nodejs18.x",
+          "runtime": "nodejs20.x",
           "vpc": {},
-          "versionLogicalId": "CrearReporteLambdaVersionftZdPXJbRo6UWvsR4gApvLBLOmg6L29gs2T20L7kkw"
+          "versionLogicalId": "CrearReporteLambdaVersion1ugnidtyDtsVxZUgQc7zFefs4juk5MtVNEypwaKa8"
         }
       }
     },
     "provider": {
       "name": "aws",
-      "runtime": "nodejs18.x",
+      "runtime": "nodejs20.x",
       "region": "us-east-1",
       "iam": {
         "role": {
@@ -581,10 +581,10 @@
             "Properties": {
               "Code": {
                 "S3Bucket": "serverless-framework-deployments-us-east-1-1b29d215-8306",
-                "S3Key": "serverless/backend-proyectate/dev/1791145928771-2026-10-04T20:32:08.771Z/backend-proyectate.zip"
+                "S3Key": "serverless/backend-proyectate/dev/1791229280639-2026-10-05T19:41:20.639Z/backend-proyectate.zip"
               },
               "Handler": "handler.crearReporte",
-              "Runtime": "nodejs18.x",
+              "Runtime": "nodejs20.x",
               "FunctionName": "backend-proyectate-dev-crearReporte",
               "MemorySize": 1024,
               "Timeout": 6,
@@ -599,14 +599,14 @@
               "CrearReporteLogGroup"
             ]
           },
-          "CrearReporteLambdaVersionftZdPXJbRo6UWvsR4gApvLBLOmg6L29gs2T20L7kkw": {
+          "CrearReporteLambdaVersion1ugnidtyDtsVxZUgQc7zFefs4juk5MtVNEypwaKa8": {
             "Type": "AWS::Lambda::Version",
             "DeletionPolicy": "Retain",
             "Properties": {
               "FunctionName": {
                 "Ref": "CrearReporteLambdaFunction"
               },
-              "CodeSha256": "0IqVHcymqueZ8J//9LMETM3wE5D4jLDbtt4e7GTSymM="
+              "CodeSha256": "jlIvts6bUOJZ8G1DGEzVcON3ACLqnGJUvD1Z/lsbaG8="
             }
           },
           "ApiGatewayRestApi": {
@@ -727,7 +727,7 @@
               "CrearReporteLambdaPermissionApiGateway"
             ]
           },
-          "ApiGatewayDeployment1791145917066": {
+          "ApiGatewayDeployment1791229266748": {
             "Type": "AWS::ApiGateway::Deployment",
             "Properties": {
               "RestApiId": {
@@ -807,7 +807,7 @@
           "CrearReporteLambdaFunctionQualifiedArn": {
             "Description": "Current Lambda function version",
             "Value": {
-              "Ref": "CrearReporteLambdaVersionftZdPXJbRo6UWvsR4gApvLBLOmg6L29gs2T20L7kkw"
+              "Ref": "CrearReporteLambdaVersion1ugnidtyDtsVxZUgQc7zFefs4juk5MtVNEypwaKa8"
             },
             "Export": {
               "Name": "sls-backend-proyectate-dev-CrearReporteLambdaFunctionQualifiedArn"
@@ -852,7 +852,7 @@
       "serviceProvider": null,
       "instanceParameters": null
     },
-    "serviceRawFile": "service: backend-proyectate\r\nframeworkVersion: '4'\r\n\r\nprovider:\r\n  name: aws\r\n  runtime: nodejs18.x\r\n  region: us-east-1\r\n  iam:\r\n    role:\r\n      statements:\r\n        - Effect: Allow\r\n          Action:\r\n            - dynamodb:PutItem\r\n            - dynamodb:Scan\r\n            - dynamodb:GetItem\r\n            - dynamodb:UpdateItem\r\n          Resource: \"arn:aws:dynamodb:${aws:region}:*:table/ReportesTabla\"\r\n\r\nresources:\r\n  Resources:\r\n    ReportesTabla:\r\n      Type: AWS::DynamoDB::Table\r\n      Properties:\r\n        TableName: ReportesTabla\r\n        AttributeDefinitions:\r\n          - AttributeName: reporteId\r\n            AttributeType: S\r\n        KeySchema:\r\n          - AttributeName: reporteId\r\n            KeyType: HASH\r\n        BillingMode: PAY_PER_REQUEST\r\n\r\nfunctions:\r\n  crearReporte:\r\n    handler: handler.crearReporte\r\n    events:\r\n      - http:\r\n          path: reportes\r\n          method: post\r\n          cors: true",
+    "serviceRawFile": "service: backend-proyectate\r\nframeworkVersion: '4'\r\n\r\nprovider:\r\n  name: aws\r\n  runtime: nodejs20.x\r\n  region: us-east-1\r\n  iam:\r\n    role:\r\n      statements:\r\n        - Effect: Allow\r\n          Action:\r\n            - dynamodb:PutItem\r\n            - dynamodb:Scan\r\n            - dynamodb:GetItem\r\n            - dynamodb:UpdateItem\r\n          Resource: \"arn:aws:dynamodb:${aws:region}:*:table/ReportesTabla\"\r\n\r\nresources:\r\n  Resources:\r\n    ReportesTabla:\r\n      Type: AWS::DynamoDB::Table\r\n      Properties:\r\n        TableName: ReportesTabla\r\n        AttributeDefinitions:\r\n          - AttributeName: reporteId\r\n            AttributeType: S\r\n        KeySchema:\r\n          - AttributeName: reporteId\r\n            KeyType: HASH\r\n        BillingMode: PAY_PER_REQUEST\r\n\r\nfunctions:\r\n  crearReporte:\r\n    handler: handler.crearReporte\r\n    events:\r\n      - http:\r\n          path: reportes\r\n          method: post\r\n          cors: true",
     "command": [
       "deploy"
     ],
@@ -865,12 +865,12 @@
     "serviceProviderAwsCfStackName": "backend-proyectate-dev",
     "serviceProviderAwsCfStackId": "arn:aws:cloudformation:us-east-1:317380567068:stack/backend-proyectate-dev/ae580d60-c032-11f1-ac03-0e75e50de11f",
     "serviceProviderAwsCfStackCreated": "2026-10-04T20:32:13.202Z",
-    "serviceProviderAwsCfStackUpdated": null,
-    "serviceProviderAwsCfStackStatus": "CREATE_COMPLETE",
+    "serviceProviderAwsCfStackUpdated": "2026-10-05T19:35:36.892Z",
+    "serviceProviderAwsCfStackStatus": "UPDATE_COMPLETE",
     "serviceProviderAwsCfStackOutputs": [
       {
         "OutputKey": "CrearReporteLambdaFunctionQualifiedArn",
-        "OutputValue": "arn:aws:lambda:us-east-1:317380567068:function:backend-proyectate-dev-crearReporte:1",
+        "OutputValue": "arn:aws:lambda:us-east-1:317380567068:function:backend-proyectate-dev-crearReporte:3",
         "Description": "Current Lambda function version",
         "ExportName": "sls-backend-proyectate-dev-CrearReporteLambdaFunctionQualifiedArn"
       },
@@ -989,10 +989,10 @@
           "Properties": {
             "Code": {
               "S3Bucket": "serverless-framework-deployments-us-east-1-1b29d215-8306",
-              "S3Key": "serverless/backend-proyectate/dev/1791145928771-2026-10-04T20:32:08.771Z/backend-proyectate.zip"
+              "S3Key": "serverless/backend-proyectate/dev/1791229280639-2026-10-05T19:41:20.639Z/backend-proyectate.zip"
             },
             "Handler": "handler.crearReporte",
-            "Runtime": "nodejs18.x",
+            "Runtime": "nodejs20.x",
             "FunctionName": "backend-proyectate-dev-crearReporte",
             "MemorySize": 1024,
             "Timeout": 6,
@@ -1007,14 +1007,14 @@
             "CrearReporteLogGroup"
           ]
         },
-        "CrearReporteLambdaVersionftZdPXJbRo6UWvsR4gApvLBLOmg6L29gs2T20L7kkw": {
+        "CrearReporteLambdaVersion1ugnidtyDtsVxZUgQc7zFefs4juk5MtVNEypwaKa8": {
           "Type": "AWS::Lambda::Version",
           "DeletionPolicy": "Retain",
           "Properties": {
             "FunctionName": {
               "Ref": "CrearReporteLambdaFunction"
             },
-            "CodeSha256": "0IqVHcymqueZ8J//9LMETM3wE5D4jLDbtt4e7GTSymM="
+            "CodeSha256": "jlIvts6bUOJZ8G1DGEzVcON3ACLqnGJUvD1Z/lsbaG8="
           }
         },
         "ApiGatewayRestApi": {
@@ -1135,7 +1135,7 @@
             "CrearReporteLambdaPermissionApiGateway"
           ]
         },
-        "ApiGatewayDeployment1791145917066": {
+        "ApiGatewayDeployment1791229266748": {
           "Type": "AWS::ApiGateway::Deployment",
           "Properties": {
             "RestApiId": {
@@ -1215,7 +1215,7 @@
         "CrearReporteLambdaFunctionQualifiedArn": {
           "Description": "Current Lambda function version",
           "Value": {
-            "Ref": "CrearReporteLambdaVersionftZdPXJbRo6UWvsR4gApvLBLOmg6L29gs2T20L7kkw"
+            "Ref": "CrearReporteLambdaVersion1ugnidtyDtsVxZUgQc7zFefs4juk5MtVNEypwaKa8"
           },
           "Export": {
             "Name": "sls-backend-proyectate-dev-CrearReporteLambdaFunctionQualifiedArn"
