@@ -62,8 +62,20 @@ module.exports.obtenerPinesAR = async (event) => {
   }
 };
 
-// 3. PUT: Marcar como resuelto (para que el pin desaparezca de la cámara)
+// 3. PUT: Marcar como resuelto (Protegido con llave maestra)
 module.exports.resolverReporte = async (event) => {
+  // 1. Extraemos las cabeceras y buscamos nuestra llave secreta
+  const headers = event.headers || {};
+  const token = headers['x-admin-token'] || headers['X-Admin-Token'];
+
+  // 2. Si no mandan la llave, o es incorrecta, bloqueamos la petición (Error 403 Forbidden)
+  if (token !== 'super-secreto-uaq-2026') {
+    return { 
+      statusCode: 403, 
+      body: JSON.stringify({ error: "Acceso denegado. Solo el personal de mantenimiento puede resolver reportes." }) 
+    };
+  }
+
   const reporteId = event.pathParameters.reporteId;
 
   const params = {

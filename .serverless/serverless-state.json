@@ -138,7 +138,7 @@
             "Properties": {
               "Code": {
                 "S3Bucket": "serverless-framework-deployments-us-east-1-1b29d215-8306",
-                "S3Key": "serverless/backend-proyectate/dev/1791743243024-2026-10-11T18:27:23.024Z/backend-proyectate.zip"
+                "S3Key": "serverless/backend-proyectate/dev/1791743847902-2026-10-11T18:37:27.902Z/backend-proyectate.zip"
               },
               "Handler": "handler.crearReporte",
               "Runtime": "nodejs22.x",
@@ -161,7 +161,7 @@
             "Properties": {
               "Code": {
                 "S3Bucket": "serverless-framework-deployments-us-east-1-1b29d215-8306",
-                "S3Key": "serverless/backend-proyectate/dev/1791743243024-2026-10-11T18:27:23.024Z/backend-proyectate.zip"
+                "S3Key": "serverless/backend-proyectate/dev/1791743847902-2026-10-11T18:37:27.902Z/backend-proyectate.zip"
               },
               "Handler": "handler.obtenerPinesAR",
               "Runtime": "nodejs22.x",
@@ -184,7 +184,7 @@
             "Properties": {
               "Code": {
                 "S3Bucket": "serverless-framework-deployments-us-east-1-1b29d215-8306",
-                "S3Key": "serverless/backend-proyectate/dev/1791743243024-2026-10-11T18:27:23.024Z/backend-proyectate.zip"
+                "S3Key": "serverless/backend-proyectate/dev/1791743847902-2026-10-11T18:37:27.902Z/backend-proyectate.zip"
               },
               "Handler": "handler.resolverReporte",
               "Runtime": "nodejs22.x",
@@ -202,34 +202,34 @@
               "ResolverReporteLogGroup"
             ]
           },
-          "CrearReporteLambdaVersionYMUqqw2EhLC8uF1LP29beBJFrtzqMRYA5gHfWhLAtI": {
+          "CrearReporteLambdaVersionxUxMjxkXakObWyckUmD1Q68sOi0bE4XhMzhVx1w": {
             "Type": "AWS::Lambda::Version",
             "DeletionPolicy": "Retain",
             "Properties": {
               "FunctionName": {
                 "Ref": "CrearReporteLambdaFunction"
               },
-              "CodeSha256": "ngKdHoSk7fKzfPg2I5xx0tMhOVBNsgLDiUKdIGUYOFc="
+              "CodeSha256": "yC63O/xCqlKPfwsMvKduvy7eD/EP3iOePon9v0eMo/M="
             }
           },
-          "ObtenerPinesARLambdaVersionwfq8GUwNc88jlJfwyLyLkEbOt9WY6xiBo6jnuN6yQ": {
+          "ObtenerPinesARLambdaVersionbnqBUxpUIhLJLnYUdAEztxGL0SWX9yVApfE8kB8YE": {
             "Type": "AWS::Lambda::Version",
             "DeletionPolicy": "Retain",
             "Properties": {
               "FunctionName": {
                 "Ref": "ObtenerPinesARLambdaFunction"
               },
-              "CodeSha256": "ngKdHoSk7fKzfPg2I5xx0tMhOVBNsgLDiUKdIGUYOFc="
+              "CodeSha256": "yC63O/xCqlKPfwsMvKduvy7eD/EP3iOePon9v0eMo/M="
             }
           },
-          "ResolverReporteLambdaVersionsRGICLLVmMNLrnvguegtaYNDIKmGZJTPwNVz6HKdM": {
+          "ResolverReporteLambdaVersionQhLO3LmhHd2fk9Sr0IeDoMlLZ5CQ2MjC3pARMm9lP9g": {
             "Type": "AWS::Lambda::Version",
             "DeletionPolicy": "Retain",
             "Properties": {
               "FunctionName": {
                 "Ref": "ResolverReporteLambdaFunction"
               },
-              "CodeSha256": "ngKdHoSk7fKzfPg2I5xx0tMhOVBNsgLDiUKdIGUYOFc="
+              "CodeSha256": "yC63O/xCqlKPfwsMvKduvy7eD/EP3iOePon9v0eMo/M="
             }
           },
           "ApiGatewayRestApi": {
@@ -595,7 +595,7 @@
               "ResolverReporteLambdaPermissionApiGateway"
             ]
           },
-          "ApiGatewayDeployment1791743235350": {
+          "ApiGatewayDeployment1791743838443": {
             "Type": "AWS::ApiGateway::Deployment",
             "Properties": {
               "RestApiId": {
@@ -771,7 +771,7 @@
           "CrearReporteLambdaFunctionQualifiedArn": {
             "Description": "Current Lambda function version",
             "Value": {
-              "Ref": "CrearReporteLambdaVersionYMUqqw2EhLC8uF1LP29beBJFrtzqMRYA5gHfWhLAtI"
+              "Ref": "CrearReporteLambdaVersionxUxMjxkXakObWyckUmD1Q68sOi0bE4XhMzhVx1w"
             },
             "Export": {
               "Name": "sls-backend-proyectate-dev-CrearReporteLambdaFunctionQualifiedArn"
@@ -780,7 +780,7 @@
           "ObtenerPinesARLambdaFunctionQualifiedArn": {
             "Description": "Current Lambda function version",
             "Value": {
-              "Ref": "ObtenerPinesARLambdaVersionwfq8GUwNc88jlJfwyLyLkEbOt9WY6xiBo6jnuN6yQ"
+              "Ref": "ObtenerPinesARLambdaVersionbnqBUxpUIhLJLnYUdAEztxGL0SWX9yVApfE8kB8YE"
             },
             "Export": {
               "Name": "sls-backend-proyectate-dev-ObtenerPinesARLambdaFunctionQualifiedArn"
@@ -789,7 +789,7 @@
           "ResolverReporteLambdaFunctionQualifiedArn": {
             "Description": "Current Lambda function version",
             "Value": {
-              "Ref": "ResolverReporteLambdaVersionsRGICLLVmMNLrnvguegtaYNDIKmGZJTPwNVz6HKdM"
+              "Ref": "ResolverReporteLambdaVersionQhLO3LmhHd2fk9Sr0IeDoMlLZ5CQ2MjC3pARMm9lP9g"
             },
             "Export": {
               "Name": "sls-backend-proyectate-dev-ResolverReporteLambdaFunctionQualifiedArn"
@@ -861,7 +861,7 @@
         "timeout": 6,
         "runtime": "nodejs22.x",
         "vpc": {},
-        "versionLogicalId": "CrearReporteLambdaVersionYMUqqw2EhLC8uF1LP29beBJFrtzqMRYA5gHfWhLAtI"
+        "versionLogicalId": "CrearReporteLambdaVersionxUxMjxkXakObWyckUmD1Q68sOi0bE4XhMzhVx1w"
       },
       "obtenerPinesAR": {
         "handler": "handler.obtenerPinesAR",
@@ -897,7 +897,7 @@
         "timeout": 6,
         "runtime": "nodejs22.x",
         "vpc": {},
-        "versionLogicalId": "ObtenerPinesARLambdaVersionwfq8GUwNc88jlJfwyLyLkEbOt9WY6xiBo6jnuN6yQ"
+        "versionLogicalId": "ObtenerPinesARLambdaVersionbnqBUxpUIhLJLnYUdAEztxGL0SWX9yVApfE8kB8YE"
       },
       "resolverReporte": {
         "handler": "handler.resolverReporte",
@@ -933,7 +933,7 @@
         "timeout": 6,
         "runtime": "nodejs22.x",
         "vpc": {},
-        "versionLogicalId": "ResolverReporteLambdaVersionsRGICLLVmMNLrnvguegtaYNDIKmGZJTPwNVz6HKdM"
+        "versionLogicalId": "ResolverReporteLambdaVersionQhLO3LmhHd2fk9Sr0IeDoMlLZ5CQ2MjC3pARMm9lP9g"
       }
     },
     "resources": {
@@ -999,7 +999,7 @@
     "artifact": "C:\\Users\\YouTu\\Downloads\\uaq_fix\\backend-proyectate\\.serverless\\backend-proyectate.zip"
   },
   "package": {
-    "artifactDirectoryName": "serverless/backend-proyectate/dev/1791743243024-2026-10-11T18:27:23.024Z",
+    "artifactDirectoryName": "serverless/backend-proyectate/dev/1791743847902-2026-10-11T18:37:27.902Z",
     "artifact": "backend-proyectate.zip"
   }
 }
