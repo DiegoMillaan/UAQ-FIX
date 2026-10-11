@@ -3,7 +3,7 @@ frameworkVersion: '4'
 
 provider:
   name: aws
-  runtime: nodejs20.x
+  runtime: nodejs22.x # <-- Actualizado a la versión más reciente para evitar la advertencia
   region: us-east-1
   iam:
     role:
@@ -14,7 +14,10 @@ provider:
             - dynamodb:Scan
             - dynamodb:GetItem
             - dynamodb:UpdateItem
-          Resource: "arn:aws:dynamodb:${aws:region}:*:table/ReportesTabla"
+            - dynamodb:Query
+          Resource: 
+            - "arn:aws:dynamodb:${aws:region}:*:table/ReportesTabla"
+            - "arn:aws:dynamodb:${aws:region}:*:table/ReportesTabla/index/UbicacionIndex"
 
 resources:
   Resources:
@@ -25,9 +28,18 @@ resources:
         AttributeDefinitions:
           - AttributeName: reporteId
             AttributeType: S
+          - AttributeName: ubicacion_qr
+            AttributeType: S
         KeySchema:
           - AttributeName: reporteId
             KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: UbicacionIndex
+            KeySchema:
+              - AttributeName: ubicacion_qr
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
         BillingMode: PAY_PER_REQUEST
 
 functions:
@@ -37,4 +49,20 @@ functions:
       - http:
           path: reportes
           method: post
+          cors: true
+          
+  obtenerPinesAR:
+    handler: handler.obtenerPinesAR
+    events:
+      - http:
+          path: ubicaciones/{ubicacion_qr}/reportes # <-- CAMBIO CLAVE: Ruta independiente
+          method: get
+          cors: true
+
+  resolverReporte:
+    handler: handler.resolverReporte
+    events:
+      - http:
+          path: reportes/{reporteId}/resolver
+          method: put
           cors: true

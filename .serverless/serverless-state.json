@@ -6,7 +6,7 @@
     },
     "provider": {
       "name": "aws",
-      "runtime": "nodejs20.x",
+      "runtime": "nodejs22.x",
       "region": "us-east-1",
       "iam": {
         "role": {
@@ -17,9 +17,13 @@
                 "dynamodb:PutItem",
                 "dynamodb:Scan",
                 "dynamodb:GetItem",
-                "dynamodb:UpdateItem"
+                "dynamodb:UpdateItem",
+                "dynamodb:Query"
               ],
-              "Resource": "arn:aws:dynamodb:us-east-1:*:table/ReportesTabla"
+              "Resource": [
+                "arn:aws:dynamodb:us-east-1:*:table/ReportesTabla",
+                "arn:aws:dynamodb:us-east-1:*:table/ReportesTabla/index/UbicacionIndex"
+              ]
             }
           ]
         }
@@ -34,6 +38,18 @@
             "Type": "AWS::Logs::LogGroup",
             "Properties": {
               "LogGroupName": "/aws/lambda/backend-proyectate-dev-crearReporte"
+            }
+          },
+          "ObtenerPinesARLogGroup": {
+            "Type": "AWS::Logs::LogGroup",
+            "Properties": {
+              "LogGroupName": "/aws/lambda/backend-proyectate-dev-obtenerPinesAR"
+            }
+          },
+          "ResolverReporteLogGroup": {
+            "Type": "AWS::Logs::LogGroup",
+            "Properties": {
+              "LogGroupName": "/aws/lambda/backend-proyectate-dev-resolverReporte"
             }
           },
           "IamRoleLambdaExecution": {
@@ -122,10 +138,10 @@
             "Properties": {
               "Code": {
                 "S3Bucket": "serverless-framework-deployments-us-east-1-1b29d215-8306",
-                "S3Key": "serverless/backend-proyectate/dev/1791229280639-2026-10-05T19:41:20.639Z/backend-proyectate.zip"
+                "S3Key": "serverless/backend-proyectate/dev/1791743243024-2026-10-11T18:27:23.024Z/backend-proyectate.zip"
               },
               "Handler": "handler.crearReporte",
-              "Runtime": "nodejs20.x",
+              "Runtime": "nodejs22.x",
               "FunctionName": "backend-proyectate-dev-crearReporte",
               "MemorySize": 1024,
               "Timeout": 6,
@@ -140,14 +156,80 @@
               "CrearReporteLogGroup"
             ]
           },
-          "CrearReporteLambdaVersion1ugnidtyDtsVxZUgQc7zFefs4juk5MtVNEypwaKa8": {
+          "ObtenerPinesARLambdaFunction": {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+              "Code": {
+                "S3Bucket": "serverless-framework-deployments-us-east-1-1b29d215-8306",
+                "S3Key": "serverless/backend-proyectate/dev/1791743243024-2026-10-11T18:27:23.024Z/backend-proyectate.zip"
+              },
+              "Handler": "handler.obtenerPinesAR",
+              "Runtime": "nodejs22.x",
+              "FunctionName": "backend-proyectate-dev-obtenerPinesAR",
+              "MemorySize": 1024,
+              "Timeout": 6,
+              "Role": {
+                "Fn::GetAtt": [
+                  "IamRoleLambdaExecution",
+                  "Arn"
+                ]
+              }
+            },
+            "DependsOn": [
+              "ObtenerPinesARLogGroup"
+            ]
+          },
+          "ResolverReporteLambdaFunction": {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+              "Code": {
+                "S3Bucket": "serverless-framework-deployments-us-east-1-1b29d215-8306",
+                "S3Key": "serverless/backend-proyectate/dev/1791743243024-2026-10-11T18:27:23.024Z/backend-proyectate.zip"
+              },
+              "Handler": "handler.resolverReporte",
+              "Runtime": "nodejs22.x",
+              "FunctionName": "backend-proyectate-dev-resolverReporte",
+              "MemorySize": 1024,
+              "Timeout": 6,
+              "Role": {
+                "Fn::GetAtt": [
+                  "IamRoleLambdaExecution",
+                  "Arn"
+                ]
+              }
+            },
+            "DependsOn": [
+              "ResolverReporteLogGroup"
+            ]
+          },
+          "CrearReporteLambdaVersionYMUqqw2EhLC8uF1LP29beBJFrtzqMRYA5gHfWhLAtI": {
             "Type": "AWS::Lambda::Version",
             "DeletionPolicy": "Retain",
             "Properties": {
               "FunctionName": {
                 "Ref": "CrearReporteLambdaFunction"
               },
-              "CodeSha256": "jlIvts6bUOJZ8G1DGEzVcON3ACLqnGJUvD1Z/lsbaG8="
+              "CodeSha256": "ngKdHoSk7fKzfPg2I5xx0tMhOVBNsgLDiUKdIGUYOFc="
+            }
+          },
+          "ObtenerPinesARLambdaVersionwfq8GUwNc88jlJfwyLyLkEbOt9WY6xiBo6jnuN6yQ": {
+            "Type": "AWS::Lambda::Version",
+            "DeletionPolicy": "Retain",
+            "Properties": {
+              "FunctionName": {
+                "Ref": "ObtenerPinesARLambdaFunction"
+              },
+              "CodeSha256": "ngKdHoSk7fKzfPg2I5xx0tMhOVBNsgLDiUKdIGUYOFc="
+            }
+          },
+          "ResolverReporteLambdaVersionsRGICLLVmMNLrnvguegtaYNDIKmGZJTPwNVz6HKdM": {
+            "Type": "AWS::Lambda::Version",
+            "DeletionPolicy": "Retain",
+            "Properties": {
+              "FunctionName": {
+                "Ref": "ResolverReporteLambdaFunction"
+              },
+              "CodeSha256": "ngKdHoSk7fKzfPg2I5xx0tMhOVBNsgLDiUKdIGUYOFc="
             }
           },
           "ApiGatewayRestApi": {
@@ -170,6 +252,69 @@
                   "ApiGatewayRestApi",
                   "RootResourceId"
                 ]
+              },
+              "PathPart": "reportes",
+              "RestApiId": {
+                "Ref": "ApiGatewayRestApi"
+              }
+            }
+          },
+          "ApiGatewayResourceReportesReporteidVar": {
+            "Type": "AWS::ApiGateway::Resource",
+            "Properties": {
+              "ParentId": {
+                "Ref": "ApiGatewayResourceReportes"
+              },
+              "PathPart": "{reporteId}",
+              "RestApiId": {
+                "Ref": "ApiGatewayRestApi"
+              }
+            }
+          },
+          "ApiGatewayResourceReportesReporteidVarResolver": {
+            "Type": "AWS::ApiGateway::Resource",
+            "Properties": {
+              "ParentId": {
+                "Ref": "ApiGatewayResourceReportesReporteidVar"
+              },
+              "PathPart": "resolver",
+              "RestApiId": {
+                "Ref": "ApiGatewayRestApi"
+              }
+            }
+          },
+          "ApiGatewayResourceUbicaciones": {
+            "Type": "AWS::ApiGateway::Resource",
+            "Properties": {
+              "ParentId": {
+                "Fn::GetAtt": [
+                  "ApiGatewayRestApi",
+                  "RootResourceId"
+                ]
+              },
+              "PathPart": "ubicaciones",
+              "RestApiId": {
+                "Ref": "ApiGatewayRestApi"
+              }
+            }
+          },
+          "ApiGatewayResourceUbicacionesUbicacionqrVar": {
+            "Type": "AWS::ApiGateway::Resource",
+            "Properties": {
+              "ParentId": {
+                "Ref": "ApiGatewayResourceUbicaciones"
+              },
+              "PathPart": "{ubicacion_qr}",
+              "RestApiId": {
+                "Ref": "ApiGatewayRestApi"
+              }
+            }
+          },
+          "ApiGatewayResourceUbicacionesUbicacionqrVarReportes": {
+            "Type": "AWS::ApiGateway::Resource",
+            "Properties": {
+              "ParentId": {
+                "Ref": "ApiGatewayResourceUbicacionesUbicacionqrVar"
               },
               "PathPart": "reportes",
               "RestApiId": {
@@ -222,6 +367,96 @@
               }
             }
           },
+          "ApiGatewayMethodUbicacionesUbicacionqrVarReportesOptions": {
+            "Type": "AWS::ApiGateway::Method",
+            "Properties": {
+              "AuthorizationType": "NONE",
+              "HttpMethod": "OPTIONS",
+              "MethodResponses": [
+                {
+                  "StatusCode": "200",
+                  "ResponseParameters": {
+                    "method.response.header.Access-Control-Allow-Origin": true,
+                    "method.response.header.Access-Control-Allow-Headers": true,
+                    "method.response.header.Access-Control-Allow-Methods": true
+                  },
+                  "ResponseModels": {}
+                }
+              ],
+              "RequestParameters": {},
+              "Integration": {
+                "Type": "MOCK",
+                "RequestTemplates": {
+                  "application/json": "{statusCode:200}"
+                },
+                "ContentHandling": "CONVERT_TO_TEXT",
+                "IntegrationResponses": [
+                  {
+                    "StatusCode": "200",
+                    "ResponseParameters": {
+                      "method.response.header.Access-Control-Allow-Origin": "'*'",
+                      "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent,X-Amzn-Trace-Id'",
+                      "method.response.header.Access-Control-Allow-Methods": "'OPTIONS,GET'"
+                    },
+                    "ResponseTemplates": {
+                      "application/json": ""
+                    }
+                  }
+                ]
+              },
+              "ResourceId": {
+                "Ref": "ApiGatewayResourceUbicacionesUbicacionqrVarReportes"
+              },
+              "RestApiId": {
+                "Ref": "ApiGatewayRestApi"
+              }
+            }
+          },
+          "ApiGatewayMethodReportesReporteidVarResolverOptions": {
+            "Type": "AWS::ApiGateway::Method",
+            "Properties": {
+              "AuthorizationType": "NONE",
+              "HttpMethod": "OPTIONS",
+              "MethodResponses": [
+                {
+                  "StatusCode": "200",
+                  "ResponseParameters": {
+                    "method.response.header.Access-Control-Allow-Origin": true,
+                    "method.response.header.Access-Control-Allow-Headers": true,
+                    "method.response.header.Access-Control-Allow-Methods": true
+                  },
+                  "ResponseModels": {}
+                }
+              ],
+              "RequestParameters": {},
+              "Integration": {
+                "Type": "MOCK",
+                "RequestTemplates": {
+                  "application/json": "{statusCode:200}"
+                },
+                "ContentHandling": "CONVERT_TO_TEXT",
+                "IntegrationResponses": [
+                  {
+                    "StatusCode": "200",
+                    "ResponseParameters": {
+                      "method.response.header.Access-Control-Allow-Origin": "'*'",
+                      "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent,X-Amzn-Trace-Id'",
+                      "method.response.header.Access-Control-Allow-Methods": "'OPTIONS,PUT'"
+                    },
+                    "ResponseTemplates": {
+                      "application/json": ""
+                    }
+                  }
+                ]
+              },
+              "ResourceId": {
+                "Ref": "ApiGatewayResourceReportesReporteidVarResolver"
+              },
+              "RestApiId": {
+                "Ref": "ApiGatewayRestApi"
+              }
+            }
+          },
           "ApiGatewayMethodReportesPost": {
             "Type": "AWS::ApiGateway::Method",
             "Properties": {
@@ -268,7 +503,99 @@
               "CrearReporteLambdaPermissionApiGateway"
             ]
           },
-          "ApiGatewayDeployment1791229266748": {
+          "ApiGatewayMethodUbicacionesUbicacionqrVarReportesGet": {
+            "Type": "AWS::ApiGateway::Method",
+            "Properties": {
+              "HttpMethod": "GET",
+              "RequestParameters": {},
+              "ResourceId": {
+                "Ref": "ApiGatewayResourceUbicacionesUbicacionqrVarReportes"
+              },
+              "RestApiId": {
+                "Ref": "ApiGatewayRestApi"
+              },
+              "ApiKeyRequired": false,
+              "AuthorizationType": "NONE",
+              "Integration": {
+                "IntegrationHttpMethod": "POST",
+                "Type": "AWS_PROXY",
+                "Uri": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition"
+                      },
+                      ":apigateway:",
+                      {
+                        "Ref": "AWS::Region"
+                      },
+                      ":lambda:path/2015-03-31/functions/",
+                      {
+                        "Fn::GetAtt": [
+                          "ObtenerPinesARLambdaFunction",
+                          "Arn"
+                        ]
+                      },
+                      "/invocations"
+                    ]
+                  ]
+                }
+              },
+              "MethodResponses": []
+            },
+            "DependsOn": [
+              "ObtenerPinesARLambdaPermissionApiGateway"
+            ]
+          },
+          "ApiGatewayMethodReportesReporteidVarResolverPut": {
+            "Type": "AWS::ApiGateway::Method",
+            "Properties": {
+              "HttpMethod": "PUT",
+              "RequestParameters": {},
+              "ResourceId": {
+                "Ref": "ApiGatewayResourceReportesReporteidVarResolver"
+              },
+              "RestApiId": {
+                "Ref": "ApiGatewayRestApi"
+              },
+              "ApiKeyRequired": false,
+              "AuthorizationType": "NONE",
+              "Integration": {
+                "IntegrationHttpMethod": "POST",
+                "Type": "AWS_PROXY",
+                "Uri": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition"
+                      },
+                      ":apigateway:",
+                      {
+                        "Ref": "AWS::Region"
+                      },
+                      ":lambda:path/2015-03-31/functions/",
+                      {
+                        "Fn::GetAtt": [
+                          "ResolverReporteLambdaFunction",
+                          "Arn"
+                        ]
+                      },
+                      "/invocations"
+                    ]
+                  ]
+                }
+              },
+              "MethodResponses": []
+            },
+            "DependsOn": [
+              "ResolverReporteLambdaPermissionApiGateway"
+            ]
+          },
+          "ApiGatewayDeployment1791743235350": {
             "Type": "AWS::ApiGateway::Deployment",
             "Properties": {
               "RestApiId": {
@@ -278,7 +605,11 @@
             },
             "DependsOn": [
               "ApiGatewayMethodReportesOptions",
-              "ApiGatewayMethodReportesPost"
+              "ApiGatewayMethodUbicacionesUbicacionqrVarReportesOptions",
+              "ApiGatewayMethodReportesReporteidVarResolverOptions",
+              "ApiGatewayMethodReportesPost",
+              "ApiGatewayMethodUbicacionesUbicacionqrVarReportesGet",
+              "ApiGatewayMethodReportesReporteidVarResolverPut"
             ]
           },
           "CrearReporteLambdaPermissionApiGateway": {
@@ -318,6 +649,80 @@
               }
             }
           },
+          "ObtenerPinesARLambdaPermissionApiGateway": {
+            "Type": "AWS::Lambda::Permission",
+            "Properties": {
+              "FunctionName": {
+                "Fn::GetAtt": [
+                  "ObtenerPinesARLambdaFunction",
+                  "Arn"
+                ]
+              },
+              "Action": "lambda:InvokeFunction",
+              "Principal": "apigateway.amazonaws.com",
+              "SourceArn": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition"
+                    },
+                    ":execute-api:",
+                    {
+                      "Ref": "AWS::Region"
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId"
+                    },
+                    ":",
+                    {
+                      "Ref": "ApiGatewayRestApi"
+                    },
+                    "/*/*"
+                  ]
+                ]
+              }
+            }
+          },
+          "ResolverReporteLambdaPermissionApiGateway": {
+            "Type": "AWS::Lambda::Permission",
+            "Properties": {
+              "FunctionName": {
+                "Fn::GetAtt": [
+                  "ResolverReporteLambdaFunction",
+                  "Arn"
+                ]
+              },
+              "Action": "lambda:InvokeFunction",
+              "Principal": "apigateway.amazonaws.com",
+              "SourceArn": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition"
+                    },
+                    ":execute-api:",
+                    {
+                      "Ref": "AWS::Region"
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId"
+                    },
+                    ":",
+                    {
+                      "Ref": "ApiGatewayRestApi"
+                    },
+                    "/*/*"
+                  ]
+                ]
+              }
+            }
+          },
           "ReportesTabla": {
             "Type": "AWS::DynamoDB::Table",
             "Properties": {
@@ -326,12 +731,30 @@
                 {
                   "AttributeName": "reporteId",
                   "AttributeType": "S"
+                },
+                {
+                  "AttributeName": "ubicacion_qr",
+                  "AttributeType": "S"
                 }
               ],
               "KeySchema": [
                 {
                   "AttributeName": "reporteId",
                   "KeyType": "HASH"
+                }
+              ],
+              "GlobalSecondaryIndexes": [
+                {
+                  "IndexName": "UbicacionIndex",
+                  "KeySchema": [
+                    {
+                      "AttributeName": "ubicacion_qr",
+                      "KeyType": "HASH"
+                    }
+                  ],
+                  "Projection": {
+                    "ProjectionType": "ALL"
+                  }
                 }
               ],
               "BillingMode": "PAY_PER_REQUEST"
@@ -348,10 +771,28 @@
           "CrearReporteLambdaFunctionQualifiedArn": {
             "Description": "Current Lambda function version",
             "Value": {
-              "Ref": "CrearReporteLambdaVersion1ugnidtyDtsVxZUgQc7zFefs4juk5MtVNEypwaKa8"
+              "Ref": "CrearReporteLambdaVersionYMUqqw2EhLC8uF1LP29beBJFrtzqMRYA5gHfWhLAtI"
             },
             "Export": {
               "Name": "sls-backend-proyectate-dev-CrearReporteLambdaFunctionQualifiedArn"
+            }
+          },
+          "ObtenerPinesARLambdaFunctionQualifiedArn": {
+            "Description": "Current Lambda function version",
+            "Value": {
+              "Ref": "ObtenerPinesARLambdaVersionwfq8GUwNc88jlJfwyLyLkEbOt9WY6xiBo6jnuN6yQ"
+            },
+            "Export": {
+              "Name": "sls-backend-proyectate-dev-ObtenerPinesARLambdaFunctionQualifiedArn"
+            }
+          },
+          "ResolverReporteLambdaFunctionQualifiedArn": {
+            "Description": "Current Lambda function version",
+            "Value": {
+              "Ref": "ResolverReporteLambdaVersionsRGICLLVmMNLrnvguegtaYNDIKmGZJTPwNVz6HKdM"
+            },
+            "Export": {
+              "Name": "sls-backend-proyectate-dev-ResolverReporteLambdaFunctionQualifiedArn"
             }
           },
           "ServiceEndpoint": {
@@ -418,9 +859,81 @@
         "package": {},
         "memory": 1024,
         "timeout": 6,
-        "runtime": "nodejs20.x",
+        "runtime": "nodejs22.x",
         "vpc": {},
-        "versionLogicalId": "CrearReporteLambdaVersion1ugnidtyDtsVxZUgQc7zFefs4juk5MtVNEypwaKa8"
+        "versionLogicalId": "CrearReporteLambdaVersionYMUqqw2EhLC8uF1LP29beBJFrtzqMRYA5gHfWhLAtI"
+      },
+      "obtenerPinesAR": {
+        "handler": "handler.obtenerPinesAR",
+        "events": [
+          {
+            "http": {
+              "path": "ubicaciones/{ubicacion_qr}/reportes",
+              "method": "get",
+              "cors": {
+                "origin": "*",
+                "methods": [
+                  "OPTIONS",
+                  "GET"
+                ],
+                "headers": [
+                  "Content-Type",
+                  "X-Amz-Date",
+                  "Authorization",
+                  "X-Api-Key",
+                  "X-Amz-Security-Token",
+                  "X-Amz-User-Agent",
+                  "X-Amzn-Trace-Id"
+                ],
+                "allowCredentials": false
+              },
+              "integration": "AWS_PROXY"
+            }
+          }
+        ],
+        "name": "backend-proyectate-dev-obtenerPinesAR",
+        "package": {},
+        "memory": 1024,
+        "timeout": 6,
+        "runtime": "nodejs22.x",
+        "vpc": {},
+        "versionLogicalId": "ObtenerPinesARLambdaVersionwfq8GUwNc88jlJfwyLyLkEbOt9WY6xiBo6jnuN6yQ"
+      },
+      "resolverReporte": {
+        "handler": "handler.resolverReporte",
+        "events": [
+          {
+            "http": {
+              "path": "reportes/{reporteId}/resolver",
+              "method": "put",
+              "cors": {
+                "origin": "*",
+                "methods": [
+                  "OPTIONS",
+                  "PUT"
+                ],
+                "headers": [
+                  "Content-Type",
+                  "X-Amz-Date",
+                  "Authorization",
+                  "X-Api-Key",
+                  "X-Amz-Security-Token",
+                  "X-Amz-User-Agent",
+                  "X-Amzn-Trace-Id"
+                ],
+                "allowCredentials": false
+              },
+              "integration": "AWS_PROXY"
+            }
+          }
+        ],
+        "name": "backend-proyectate-dev-resolverReporte",
+        "package": {},
+        "memory": 1024,
+        "timeout": 6,
+        "runtime": "nodejs22.x",
+        "vpc": {},
+        "versionLogicalId": "ResolverReporteLambdaVersionsRGICLLVmMNLrnvguegtaYNDIKmGZJTPwNVz6HKdM"
       }
     },
     "resources": {
@@ -433,12 +946,30 @@
               {
                 "AttributeName": "reporteId",
                 "AttributeType": "S"
+              },
+              {
+                "AttributeName": "ubicacion_qr",
+                "AttributeType": "S"
               }
             ],
             "KeySchema": [
               {
                 "AttributeName": "reporteId",
                 "KeyType": "HASH"
+              }
+            ],
+            "GlobalSecondaryIndexes": [
+              {
+                "IndexName": "UbicacionIndex",
+                "KeySchema": [
+                  {
+                    "AttributeName": "ubicacion_qr",
+                    "KeyType": "HASH"
+                  }
+                ],
+                "Projection": {
+                  "ProjectionType": "ALL"
+                }
               }
             ],
             "BillingMode": "PAY_PER_REQUEST"
@@ -468,7 +999,7 @@
     "artifact": "C:\\Users\\YouTu\\Downloads\\uaq_fix\\backend-proyectate\\.serverless\\backend-proyectate.zip"
   },
   "package": {
-    "artifactDirectoryName": "serverless/backend-proyectate/dev/1791229280639-2026-10-05T19:41:20.639Z",
+    "artifactDirectoryName": "serverless/backend-proyectate/dev/1791743243024-2026-10-11T18:27:23.024Z",
     "artifact": "backend-proyectate.zip"
   }
 }
