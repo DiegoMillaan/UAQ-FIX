@@ -1,0 +1,77 @@
+service: backend-proyectate
+frameworkVersion: '4'
+
+provider:
+  name: aws
+  runtime: nodejs22.x # <-- Actualizado a la versión más reciente para evitar la advertencia
+  region: us-east-1
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+            - dynamodb:Scan
+            - dynamodb:GetItem
+            - dynamodb:UpdateItem
+            - dynamodb:Query
+          Resource: 
+            - "arn:aws:dynamodb:${aws:region}:*:table/ReportesTabla"
+            - "arn:aws:dynamodb:${aws:region}:*:table/ReportesTabla/index/UbicacionIndex"
+
+resources:
+  Resources:
+    ReportesTabla:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ReportesTabla
+        AttributeDefinitions:
+          - AttributeName: reporteId
+            AttributeType: S
+          - AttributeName: ubicacion_qr
+            AttributeType: S
+        KeySchema:
+          - AttributeName: reporteId
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: UbicacionIndex
+            KeySchema:
+              - AttributeName: ubicacion_qr
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+        BillingMode: PAY_PER_REQUEST
+
+functions:
+  crearReporte:
+    handler: handler.crearReporte
+    events:
+      - http:
+          path: reportes
+          method: post
+          cors: true
+          
+  obtenerPinesAR:
+    handler: handler.obtenerPinesAR
+    events:
+      - http:
+          path: ubicaciones/{ubicacion_qr}/reportes # <-- CAMBIO CLAVE: Ruta independiente
+          method: get
+          cors: true
+
+  resolverReporte:
+    handler: handler.resolverReporte
+    events:
+      - http:
+          path: reportes/{reporteId}/resolver
+          method: put
+          cors: true
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  mobile_scanner: ^5.1.0 # Para escanear el ubicacion_qr
+  ar_flutter_plugin_2: ^0.0.3 # Fork actualizado compatible con Gradle 8+
+  vector_math: ^2.1.4
+  camera: ^0.11.0+1
