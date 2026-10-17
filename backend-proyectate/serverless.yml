@@ -66,12 +66,3 @@ functions:
           path: reportes/{reporteId}/resolver
           method: put
           cors: true
-
-dependencies:
-  flutter:
-    sdk: flutter
-  http: ^1.2.0
-  mobile_scanner: ^5.1.0 # Para escanear el ubicacion_qr
-  ar_flutter_plugin_2: ^0.0.3 # Fork actualizado compatible con Gradle 8+
-  vector_math: ^2.1.4
-  camera: ^0.11.0+1

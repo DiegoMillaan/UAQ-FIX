@@ -43,3 +43,8 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // Correcto para build.gradle.kts
+    implementation("androidx.concurrent:concurrent-futures:1.2.0")
+}

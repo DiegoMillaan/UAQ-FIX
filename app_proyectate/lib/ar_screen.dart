@@ -1,16 +1,27 @@
+import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
+import 'package:sensors_plus/sensors_plus.dart';
 import 'api_service.dart';
+import 'main.dart';
 
 class ArWorkspaceScreen extends StatefulWidget {
   final String ubicacionQr;
-  const ArWorkspaceScreen({super.key, required this.ubicacionQr});
+  final String nombreZona;
+
+  const ArWorkspaceScreen({
+    super.key,
+    required this.ubicacionQr,
+    this.nombreZona = "Espacio AR",
+  });
 
   @override
   State<ArWorkspaceScreen> createState() => _ArWorkspaceScreenState();
 }
 
-class _ArWorkspaceScreenState extends State<ArWorkspaceScreen> {
+class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
+    with SingleTickerProviderStateMixin {
   CameraController? _cameraController;
   bool _camaraLista = false;
 
@@ -18,13 +29,40 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen> {
   bool _cargandoPines = true;
   bool _modoTecnico = false;
 
-  // Coordenadas temporales mientras el usuario llena el formulario
+  // Subscripciones de Fusión de Sensores (Giroscopio + Acelerómetro a 50Hz)
+  StreamSubscription<GyroscopeEvent>? _gyroSub;
+  StreamSubscription<AccelerometerEvent>? _accelSub;
+
+  // Orientación espacial 3D de la cámara en radianes
+  // _camYaw: [-pi, pi] (0 = frente al QR, pi/-pi = pared de atrás 180°)
+  // _camPitch: [-pi/2, pi/2] (0 = horizonte nivelado, + = mirando arriba, - = abajo)
+  double _camYaw = 0.0;
+  double _camPitch = 0.0;
+  DateTime? _ultimoEventoGyro;
+
+  // Vector de gravedad normalizado (Acelerómetro) para anclar la vertical real
+  double _gravX = 0.0;
+  double _gravY = 9.81;
+  double _gravZ = 0.0;
+  bool _pitchInicializado = false;
+
+  // Campo de visión óptico real de cámara trasera en modo vertical (en radianes)
+  static const double _fovHorizontalRad = 0.98; // ~56 grados horizontales
+  static const double _fovVerticalRad = 1.32;   // ~75 grados verticales
+
   Offset? _puntoTemporalPantalla;
+  late AnimationController _pinPulseController;
 
   @override
   void initState() {
     super.initState();
+    _pinPulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1500),
+    )..repeat(reverse: true);
+
     _inicializarCamara();
+    _iniciarFusionDeSensores3D();
     _cargarPinesDesdeAWS();
   }
 
@@ -47,6 +85,97 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen> {
     }
   }
 
+  // Normaliza cualquier ángulo al rango [-pi, pi] para permitir giros infinitos de 360°
+  double _normalizarAngulo(double anguloRad) {
+    double a = (anguloRad + math.pi) % (2 * math.pi);
+    if (a < 0) a += 2 * math.pi;
+    return a - math.pi;
+  }
+
+  // Fusión de Sensores 3D: Acelerómetro (Gravedad absoluta) + Giroscopio (Alta velocidad 50Hz)
+  void _iniciarFusionDeSensores3D() {
+    // 1. Acelerómetro: Mantiene el ángulo vertical (Pitch) clavado al horizonte real sin deriva
+    _accelSub = accelerometerEventStream(
+      samplingPeriod: SensorInterval.gameInterval,
+    ).listen((AccelerometerEvent event) {
+      // Filtro paso-bajo suave para aislar la gravedad de sacudidas de la mano
+      _gravX = _gravX * 0.85 + event.x * 0.15;
+      _gravY = _gravY * 0.85 + event.y * 0.15;
+      _gravZ = _gravZ * 0.85 + event.z * 0.15;
+
+      final double normG = math.sqrt(
+        _gravX * _gravX + _gravY * _gravY + _gravZ * _gravZ,
+      );
+      if (normG < 1.0) return;
+
+      // En vertical: Y apunta arriba, Z apunta hacia el usuario.
+      // Al inclinar la cámara hacia el techo, Z se vuelve positivo.
+      final double pitchGravedad = math.atan2(
+        _gravZ,
+        math.sqrt(_gravX * _gravX + _gravY * _gravY),
+      );
+
+      if (!_pitchInicializado) {
+        _camPitch = pitchGravedad;
+        _pitchInicializado = true;
+      } else {
+        // Filtro complementario: corrige cualquier deriva vertical con la gravedad real
+        _camPitch = _camPitch * 0.92 + pitchGravedad * 0.08;
+      }
+    });
+
+    // 2. Giroscopio a 50Hz: Proyecta la rotación sobre el vector de gravedad real del salón
+    _gyroSub = gyroscopeEventStream(
+      samplingPeriod: SensorInterval.gameInterval,
+    ).listen((GyroscopeEvent event) {
+      final ahora = DateTime.now();
+      if (_ultimoEventoGyro != null) {
+        final double dt =
+            ahora.difference(_ultimoEventoGyro!).inMicroseconds / 1000000.0;
+
+        if (dt > 0.0 && dt < 0.2) {
+          final double normG = math.sqrt(
+            _gravX * _gravX + _gravY * _gravY + _gravZ * _gravZ,
+          );
+
+          // Vector unitario "Arriba" del mundo real respecto a la postura actual del teléfono
+          final double ux = normG > 1.0 ? (_gravX / normG) : 0.0;
+          final double uy = normG > 1.0 ? (_gravY / normG) : 1.0;
+          final double uz = normG > 1.0 ? (_gravZ / normG) : 0.0;
+
+          // Zona muerta mínima solo para ruido electrónico en reposo
+          final double wx = event.x.abs() > 0.008 ? event.x : 0.0;
+          final double wy = event.y.abs() > 0.008 ? event.y : 0.0;
+          final double wz = event.z.abs() > 0.008 ? event.z : 0.0;
+
+          if (wx != 0.0 || wy != 0.0 || wz != 0.0) {
+            // Producto punto: velocidad de giro horizontal real en el cuarto (independiente de la inclinación)
+            final double yawRate = -(wx * ux + wy * uy + wz * uz);
+            final double pitchRate = wx;
+
+            setState(() {
+              _camYaw = _normalizarAngulo(_camYaw + yawRate * dt);
+              _camPitch = (_camPitch + pitchRate * dt)
+                  .clamp(-math.pi / 2.1, math.pi / 2.1);
+            });
+          }
+        }
+      }
+      _ultimoEventoGyro = ahora;
+    });
+  }
+
+  void _recalibrarOrigenEspacial() {
+    setState(() {
+      _camYaw = 0.0;
+    });
+    _mostrarNotificacion(
+      icono: Icons.center_focus_strong_rounded,
+      texto: "Frente (0°) recalibrado hacia tu dirección actual",
+      color: UaqFixApp.primaryBlue,
+    );
+  }
+
   Future<void> _cargarPinesDesdeAWS() async {
     setState(() => _cargandoPines = true);
     try {
@@ -60,77 +189,160 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen> {
     } catch (e) {
       if (mounted) {
         setState(() => _cargandoPines = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text("Error al sincronizar pines: $e"),
-            backgroundColor: Colors.redAccent,
-          ),
+        _mostrarNotificacion(
+          icono: Icons.cloud_off_rounded,
+          texto: "No se pudo sincronizar con AWS",
+          color: const Color(0xFFDC2626),
         );
       }
     }
   }
 
+  void _mostrarNotificacion({
+    required IconData icono,
+    required String texto,
+    required Color color,
+  }) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).clearSnackBars();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: Colors.white,
+        elevation: 6,
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 85),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: BorderSide(color: color.withOpacity(0.3), width: 1),
+        ),
+        content: Row(
+          children: [
+            Icon(icono, color: color, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                texto,
+                style: const TextStyle(
+                  color: UaqFixApp.textDark,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   void dispose() {
+    _gyroSub?.cancel();
+    _accelSub?.cancel();
+    _pinPulseController.dispose();
     _cameraController?.dispose();
     super.dispose();
   }
 
-  // Convierte el toque en pantalla a coordenadas espaciales relativas {x, y} en metros (-2.0m a +2.0m)
-  Map<String, double> _pantallaACoordenadasAR(Offset posicionToque, Size screenSize) {
-    final double normX = ((posicionToque.dx / screenSize.width) - 0.5) * 4.0;
-    final double normY = (0.5 - (posicionToque.dy / screenSize.height)) * 4.0;
+  // Convierte el punto tocado en pantalla + distancia (m) en un vector 3D real {x, y, z} en el salón
+  Map<String, double> _calcularVector3DMundo(
+    Offset posicionToque,
+    Size screenSize,
+    double distanciaMetros,
+  ) {
+    // Desplazamiento angular del toque respecto al centro óptico de la cámara
+    final double offsetYaw =
+        ((posicionToque.dx / screenSize.width) - 0.5) * _fovHorizontalRad;
+    final double offsetPitch =
+        (0.5 - (posicionToque.dy / screenSize.height)) * _fovVerticalRad;
+
+    final double pinYaw = _normalizarAngulo(_camYaw + offsetYaw);
+    final double pinPitch =
+        (_camPitch + offsetPitch).clamp(-math.pi / 2.1, math.pi / 2.1);
+
+    // Proyección esférica a coordenadas cartesianas 3D (en metros)
+    // Frente (0°) => Z negativo | Pared de atrás (180°) => Z positivo | Derecha (90°) => X positivo
+    final double d = distanciaMetros.abs();
+    final double worldX = d * math.cos(pinPitch) * math.sin(pinYaw);
+    final double worldY = d * math.sin(pinPitch);
+    final double worldZ = -d * math.cos(pinPitch) * math.cos(pinYaw);
+
     return {
-      "x": double.parse(normX.toStringAsFixed(2)),
-      "y": double.parse(normY.toStringAsFixed(2)),
+      "x": double.parse(worldX.toStringAsFixed(2)),
+      "y": double.parse(worldY.toStringAsFixed(2)),
+      "z": double.parse(worldZ.toStringAsFixed(2)),
     };
   }
 
-  // Convierte las coordenadas {x, y} de DynamoDB de vuelta a la posición en el visor AR
-  Offset _coordenadasARAPantalla(double x, double y, Size screenSize) {
-    final double dx = ((x / 4.0) + 0.5) * screenSize.width;
-    final double dy = (0.5 - (y / 4.0)) * screenSize.height;
-    return Offset(
-      dx.clamp(30.0, screenSize.width - 30.0),
-      dy.clamp(80.0, screenSize.height - 100.0),
-    );
+  // Convierte el vector 3D {x, y, z} guardado en DynamoDB a su posición exacta en pantalla
+  Map<String, dynamic> _proyectarVector3DAPantalla(
+    double x,
+    double y,
+    double z,
+    Size screenSize,
+  ) {
+    final double distancia =
+        math.sqrt(x * x + y * y + z * z).clamp(0.4, 20.0);
+
+    // Ángulos esféricos absolutos del pin en el salón
+    final double pinYaw = math.atan2(x, -z);
+    final double pinPitch = math.asin((y / distancia).clamp(-1.0, 1.0));
+
+    // Diferencia angular respecto a hacia dónde mira la cámara en este instante
+    final double deltaYaw = _normalizarAngulo(pinYaw - _camYaw);
+    final double deltaPitch = pinPitch - _camPitch;
+
+    // Solo es visible si está frente a la cámara (hemisferio frontal) y dentro del FOV
+    final bool enHemisferioFrontal = deltaYaw.abs() < (math.pi / 2.0);
+    final double dx =
+        (0.5 + (deltaYaw / _fovHorizontalRad)) * screenSize.width;
+    final double dy =
+        (0.5 - (deltaPitch / _fovVerticalRad)) * screenSize.height;
+
+    final bool enPantalla = enHemisferioFrontal &&
+        dx >= -45 &&
+        dx <= screenSize.width + 45 &&
+        dy >= -45 &&
+        dy <= screenSize.height + 45;
+
+    return {
+      "offset": Offset(dx, dy),
+      "enPantalla": enPantalla,
+      "deltaYaw": deltaYaw,
+      "distancia": distancia,
+    };
   }
 
-  // Semáforo de color según el tipo de falla
   Color _colorPorTipo(String? tipo) {
     switch (tipo) {
       case 'Riesgo Crítico (Industria 4.0)':
-        return const Color(0xFFFF1744); // Rojo neón
+        return const Color(0xFFDC2626);
       case 'Eléctrico / Sensores IoT':
-        return const Color(0xFFFF9100); // Naranja alerta
+        return const Color(0xFFD97706);
       case 'Redes / Cómputo':
-        return const Color(0xFF00E5FF); // Cian
+        return const Color(0xFF1D4ED8);
       default:
-        return const Color(0xFF10B981); // Verde esmeralda
+        return const Color(0xFF0D9488);
     }
   }
 
   IconData _iconoPorTipo(String? tipo) {
     switch (tipo) {
       case 'Riesgo Crítico (Industria 4.0)':
-        return Icons.warning_amber_rounded;
+        return Icons.report_problem_rounded;
       case 'Eléctrico / Sensores IoT':
-        return Icons.bolt;
+        return Icons.bolt_rounded;
       case 'Redes / Cómputo':
-        return Icons.router;
+        return Icons.router_rounded;
       default:
-        return Icons.build_circle_outlined;
+        return Icons.handyman_rounded;
     }
   }
 
-  // 1. Al tocar el espacio vacío: fija el punto AR y abre el formulario
+  // Modal minimalista claro para crear un nuevo Pin AR
   void _mostrarFormularioNuevoPin(Offset toque, Size screenSize) {
-    final coordsXY = _pantallaACoordenadasAR(toque, screenSize);
-    final double x = coordsXY['x']!;
-    final double y = coordsXY['y']!;
-    double profundidadZ = -1.5; // 1.5 metros frente a la cámara por defecto
-
-    String tipoSeleccionado = 'Eléctrico / Sensores IoT';
+    double distanciaMetros = 1.5;
+    String tipoSeleccionado = 'Redes / Cómputo';
     final TextEditingController descController = TextEditingController();
     bool enviando = false;
 
@@ -139,80 +351,113 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: const Color(0xFF1E293B),
+      backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
       ),
       builder: (ctx) {
         return StatefulBuilder(
           builder: (context, setModalState) {
+            final coords3D =
+                _calcularVector3DMundo(toque, screenSize, distanciaMetros);
+            final double x = coords3D['x']!;
+            final double y = coords3D['y']!;
+            final double z = coords3D['z']!;
+
             return Padding(
               padding: EdgeInsets.only(
-                bottom: MediaQuery.of(context).viewInsets.bottom + 20,
-                left: 20,
-                right: 20,
-                top: 20,
+                bottom: MediaQuery.of(context).viewInsets.bottom + 24,
+                left: 24,
+                right: 24,
+                top: 14,
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  Center(
+                    child: Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFCBD5E1),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Row(
+                      Row(
                         children: [
-                          Icon(Icons.add_location_alt, color: Color(0xFF00E5FF)),
-                          SizedBox(width: 8),
-                          Text(
-                            "Anclar Reporte en AR",
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: UaqFixApp.lightBlueBg,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: const Icon(
+                              Icons.add_location_alt_rounded,
+                              color: UaqFixApp.primaryBlue,
+                              size: 20,
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          const Text(
+                            "Nuevo Reporte AR",
                             style: TextStyle(
                               fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white,
+                              fontWeight: FontWeight.w800,
+                              color: UaqFixApp.textDark,
                             ),
                           ),
                         ],
                       ),
                       Container(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 4),
+                            horizontal: 10, vertical: 5),
                         decoration: BoxDecoration(
-                          color: Colors.black45,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: const Color(0xFF00E5FF)),
+                          color: UaqFixApp.lightBlueBg,
+                          borderRadius: BorderRadius.circular(20),
                         ),
                         child: Text(
-                          "X:$x  Y:$y  Z:${profundidadZ.toStringAsFixed(1)}m",
+                          "X:$x  Y:$y  Z:$z",
                           style: const TextStyle(
-                            color: Color(0xFF00E5FF),
+                            color: UaqFixApp.primaryBlue,
                             fontSize: 11,
-                            fontWeight: FontWeight.bold,
+                            fontWeight: FontWeight.w700,
                           ),
                         ),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 20),
 
-                  // Categoría del problema
                   DropdownButtonFormField<String>(
                     value: tipoSeleccionado,
-                    dropdownColor: const Color(0xFF0F172A),
-                    style: const TextStyle(color: Colors.white),
+                    dropdownColor: Colors.white,
+                    style: const TextStyle(
+                      color: UaqFixApp.textDark,
+                      fontWeight: FontWeight.w500,
+                      fontSize: 14,
+                    ),
                     decoration: const InputDecoration(
-                      labelText: "Clasificación de la Falla",
-                      border: OutlineInputBorder(),
-                      prefixIcon: Icon(Icons.category, color: Color(0xFF00E5FF)),
+                      labelText: "Categoría de incidencia",
+                      prefixIcon: Icon(
+                        Icons.category_outlined,
+                        color: UaqFixApp.primaryBlue,
+                        size: 20,
+                      ),
                     ),
                     items: const [
                       DropdownMenuItem(
-                        value: 'Eléctrico / Sensores IoT',
-                        child: Text('Eléctrico / Sensores IoT'),
-                      ),
-                      DropdownMenuItem(
                         value: 'Redes / Cómputo',
                         child: Text('Redes / Cómputo'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'Eléctrico / Sensores IoT',
+                        child: Text('Eléctrico / Sensores IoT'),
                       ),
                       DropdownMenuItem(
                         value: 'Infraestructura / Mobiliario',
@@ -229,68 +474,99 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen> {
                       }
                     },
                   ),
-                  const SizedBox(height: 14),
+                  const SizedBox(height: 16),
 
-                  // Control de Profundidad Z (Distancia al objeto)
-                  Row(
-                    children: [
-                      const Text(
-                        "Distancia al objeto (Eje Z):",
-                        style: TextStyle(color: Colors.white70, fontSize: 13),
-                      ),
-                      Expanded(
-                        child: Slider(
-                          value: profundidadZ.abs(),
-                          min: 0.5,
-                          max: 5.0,
-                          divisions: 9,
-                          activeColor: const Color(0xFF00E5FF),
-                          label: "${profundidadZ.abs().toStringAsFixed(1)} m",
-                          onChanged: (val) {
-                            setModalState(() => profundidadZ = -val);
-                          },
+                  // Control de Distancia Radial al Objeto
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: UaqFixApp.backgroundSlate,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFFE2E8F0)),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.straighten_rounded,
+                          size: 18,
+                          color: UaqFixApp.textMuted,
                         ),
-                      ),
-                      Text(
-                        "${profundidadZ.abs().toStringAsFixed(1)}m",
-                        style: const TextStyle(
-                            color: Colors.white, fontWeight: FontWeight.bold),
-                      ),
-                    ],
+                        const SizedBox(width: 8),
+                        const Text(
+                          "Distancia:",
+                          style: TextStyle(
+                            color: UaqFixApp.textDark,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        Expanded(
+                          child: Slider(
+                            value: distanciaMetros,
+                            min: 0.5,
+                            max: 5.0,
+                            divisions: 9,
+                            activeColor: UaqFixApp.primaryBlue,
+                            inactiveColor: const Color(0xFFDBEAFE),
+                            onChanged: (val) {
+                              setModalState(() => distanciaMetros = val);
+                            },
+                          ),
+                        ),
+                        Text(
+                          "${distanciaMetros.toStringAsFixed(1)} m",
+                          style: const TextStyle(
+                            color: UaqFixApp.primaryBlue,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
+                  const SizedBox(height: 16),
 
-                  // Descripción detallada
                   TextField(
                     controller: descController,
                     maxLines: 2,
-                    style: const TextStyle(color: Colors.white),
+                    style: const TextStyle(
+                      color: UaqFixApp.textDark,
+                      fontSize: 14,
+                    ),
                     decoration: const InputDecoration(
-                      labelText: "Descripción de la anomalía o falla",
-                      hintText:
-                          "Ej. Contacto sin corriente / Sobrecalentamiento en motor...",
-                      border: OutlineInputBorder(),
+                      labelText: "Descripción del desperfecto",
+                      hintText: "Ej. Nodo de red sin señal en mesa 2...",
+                      hintStyle: TextStyle(color: Color(0xFF94A3B8)),
+                      prefixIcon: Icon(
+                        Icons.description_outlined,
+                        color: UaqFixApp.primaryBlue,
+                        size: 20,
+                      ),
                     ),
                   ),
-                  const SizedBox(height: 18),
+                  const SizedBox(height: 20),
 
-                  // Botón de envío a AWS
                   SizedBox(
                     width: double.infinity,
+                    height: 50,
                     child: ElevatedButton.icon(
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF00E5FF),
-                        foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        backgroundColor: UaqFixApp.primaryBlue,
+                        foregroundColor: Colors.white,
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
                       ),
                       onPressed: enviando
                           ? null
                           : () async {
                               if (descController.text.trim().isEmpty) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text(
-                                        "Escribe una descripción para el reporte"),
-                                  ),
+                                _mostrarNotificacion(
+                                  icono: Icons.info_outline_rounded,
+                                  texto: "Ingresa una breve descripción",
+                                  color: UaqFixApp.primaryBlue,
                                 );
                                 return;
                               }
@@ -303,25 +579,23 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen> {
                                   ubicacionQr: widget.ubicacionQr,
                                   x: x,
                                   y: y,
-                                  z: profundidadZ,
+                                  z: z,
                                 );
                                 if (!mounted) return;
                                 Navigator.pop(ctx);
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text(
-                                        "✅ Pin AR anclado en AWS DynamoDB"),
-                                    backgroundColor: Color(0xFF10B981),
-                                  ),
+                                _mostrarNotificacion(
+                                  icono: Icons.check_circle_outline_rounded,
+                                  texto:
+                                      "Pin AR anclado en las coordenadas 3D del salón",
+                                  color: const Color(0xFF0D9488),
                                 );
                                 _cargarPinesDesdeAWS();
                               } catch (e) {
                                 setModalState(() => enviando = false);
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text("Error: $e"),
-                                    backgroundColor: Colors.redAccent,
-                                  ),
+                                _mostrarNotificacion(
+                                  icono: Icons.error_outline_rounded,
+                                  texto: "Error al guardar el reporte",
+                                  color: const Color(0xFFDC2626),
                                 );
                               }
                             },
@@ -330,14 +604,19 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen> {
                               width: 18,
                               height: 18,
                               child: CircularProgressIndicator(
-                                  strokeWidth: 2, color: Colors.black),
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
                             )
-                          : const Icon(Icons.cloud_upload),
+                          : const Icon(Icons.push_pin_rounded, size: 18),
                       label: Text(
                         enviando
-                            ? "Sincronizando con AWS..."
-                            : "Fijar Pin AR en el Espacio",
-                        style: const TextStyle(fontWeight: FontWeight.bold),
+                            ? "Guardando en AWS..."
+                            : "Anclar Pin en esta Ubicación",
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
+                        ),
                       ),
                     ),
                   ),
@@ -354,7 +633,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen> {
     });
   }
 
-  // 2. Al tocar un Pin AR existente: muestra los detalles y permite resolverlo en Modo Técnico
+  // Modal minimalista claro para inspeccionar y resolver un Pin AR
   void _mostrarDetallePin(Map<String, dynamic> pin) {
     final coords = pin['coordenadas_ar'] ?? {'x': 0, 'y': 0, 'z': -1.5};
     final color = _colorPorTipo(pin['tipo']);
@@ -362,23 +641,39 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen> {
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1E293B),
+      backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
       ),
       builder: (ctx) {
         return StatefulBuilder(
           builder: (context, setModalState) {
             return Padding(
-              padding: const EdgeInsets.all(22.0),
+              padding: const EdgeInsets.fromLTRB(24, 14, 24, 28),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  Center(
+                    child: Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFCBD5E1),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
                   Row(
                     children: [
-                      CircleAvatar(
-                        backgroundColor: color.withOpacity(0.2),
+                      Container(
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: color.withOpacity(0.12),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
                         child: Icon(_iconoPorTipo(pin['tipo']), color: color),
                       ),
                       const SizedBox(width: 12),
@@ -387,71 +682,107 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              pin['tipo'] ?? 'Reporte General',
-                              style: TextStyle(
-                                color: color,
-                                fontWeight: FontWeight.bold,
+                              pin['tipo'] ?? 'Incidencia Registrada',
+                              style: const TextStyle(
+                                color: UaqFixApp.textDark,
+                                fontWeight: FontWeight.w800,
                                 fontSize: 16,
                               ),
                             ),
+                            const SizedBox(height: 2),
                             Text(
-                              "ID: ${pin['reporteId']}",
+                              "Nodo: ${pin['ubicacion_qr']}",
                               style: const TextStyle(
-                                  color: Colors.white38, fontSize: 11),
+                                color: UaqFixApp.textMuted,
+                                fontSize: 12,
+                              ),
                             ),
                           ],
                         ),
                       ),
-                      Chip(
-                        backgroundColor: Colors.amber.withOpacity(0.2),
-                        label: Text(
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 5),
+                        decoration: BoxDecoration(
+                          color: color.withOpacity(0.12),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(
                           pin['estado'] ?? 'Pendiente',
-                          style: const TextStyle(
-                              color: Colors.amber, fontSize: 12),
+                          style: TextStyle(
+                            color: color,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
                         ),
                       ),
                     ],
                   ),
-                  const Divider(height: 24, color: Colors.white24),
-                  const Text(
-                    "Diagnóstico / Descripción:",
-                    style: TextStyle(color: Colors.white70, fontSize: 12),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    pin['descripcion'] ?? 'Sin descripción',
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.w500),
-                  ),
-                  const SizedBox(height: 14),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        "Vector 3D: [X: ${coords['x']}, Y: ${coords['y']}, Z: ${coords['z']}m]",
-                        style: const TextStyle(
-                            color: Color(0xFF00E5FF), fontSize: 12),
-                      ),
-                      Text(
-                        "Nodo: ${pin['ubicacion_qr']}",
-                        style: const TextStyle(
-                            color: Colors.white54, fontSize: 12),
-                      ),
-                    ],
+                  const SizedBox(height: 18),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: UaqFixApp.backgroundSlate,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: const Color(0xFFE2E8F0)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          "Detalle del reporte",
+                          style: TextStyle(
+                            color: UaqFixApp.textMuted,
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          pin['descripcion'] ?? 'Sin descripción',
+                          style: const TextStyle(
+                            color: UaqFixApp.textDark,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.my_location_rounded,
+                              size: 14,
+                              color: UaqFixApp.primaryBlue,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              "Vector 3D: X: ${coords['x']}m, Y: ${coords['y']}m, Z: ${coords['z']}m",
+                              style: const TextStyle(
+                                color: UaqFixApp.primaryBlue,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
                   const SizedBox(height: 20),
 
-                  // Si está en Modo Técnico, permite ejecutar el PUT con la llave maestra
                   if (_modoTecnico)
                     SizedBox(
                       width: double.infinity,
+                      height: 50,
                       child: ElevatedButton.icon(
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF10B981),
+                          backgroundColor: UaqFixApp.primaryBlue,
                           foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
                         ),
                         onPressed: resolviendo
                             ? null
@@ -462,21 +793,18 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen> {
                                       pin['reporteId']);
                                   if (!mounted) return;
                                   Navigator.pop(ctx);
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text(
-                                          "🛠️ Reporte marcado como RESUELTO"),
-                                      backgroundColor: Color(0xFF10B981),
-                                    ),
+                                  _mostrarNotificacion(
+                                    icono: Icons.task_alt_rounded,
+                                    texto: "Reporte marcado como resuelto",
+                                    color: const Color(0xFF0D9488),
                                   );
                                   _cargarPinesDesdeAWS();
                                 } catch (e) {
                                   setModalState(() => resolviendo = false);
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                      content: Text("Error: $e"),
-                                      backgroundColor: Colors.redAccent,
-                                    ),
+                                  _mostrarNotificacion(
+                                    icono: Icons.error_outline_rounded,
+                                    texto: "No se pudo resolver el reporte",
+                                    color: const Color(0xFFDC2626),
                                   );
                                 }
                               },
@@ -485,29 +813,51 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen> {
                                 width: 18,
                                 height: 18,
                                 child: CircularProgressIndicator(
-                                    strokeWidth: 2, color: Colors.white),
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
                               )
-                            : const Icon(Icons.verified),
+                            : const Icon(Icons.check_circle_outline_rounded,
+                                size: 18),
                         label: Text(
                           resolviendo
-                              ? "Autorizando con Token..."
-                              : "Marcar como Reparado (Token Admin)",
-                          style: const TextStyle(fontWeight: FontWeight.bold),
+                              ? "Validando credencial..."
+                              : "Marcar como Resuelto",
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 14,
+                          ),
                         ),
                       ),
                     )
                   else
                     Container(
                       width: double.infinity,
-                      padding: const EdgeInsets.all(10),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 12),
                       decoration: BoxDecoration(
-                        color: Colors.black26,
-                        borderRadius: BorderRadius.circular(8),
+                        color: UaqFixApp.lightBlueBg,
+                        borderRadius: BorderRadius.circular(12),
                       ),
-                      child: const Text(
-                        "💡 Activa el 'Modo Técnico' en la barra superior para resolver y retirar este pin AR.",
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: Colors.white60, fontSize: 12),
+                      child: const Row(
+                        children: [
+                          Icon(
+                            Icons.admin_panel_settings_outlined,
+                            color: UaqFixApp.primaryBlue,
+                            size: 18,
+                          ),
+                          SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              "Activa el Modo Técnico en la barra superior para atender y cerrar esta incidencia.",
+                              style: TextStyle(
+                                color: UaqFixApp.primaryBlue,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                 ],
@@ -522,51 +872,221 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen> {
   @override
   Widget build(BuildContext context) {
     final screenSize = MediaQuery.of(context).size;
+    int pinesIzquierda = 0;
+    int pinesDerecha = 0;
+    final List<Map<String, dynamic>> puntosRadar = [];
+
+    // Pre-calculamos la proyección 3D de todos los pines activos
+    final List<Widget> widgetsPinesEnPantalla = [];
+
+    for (final pin in _pinesActivos) {
+      final coords = pin['coordenadas_ar'] ?? {'x': 0.0, 'y': 0.0, 'z': -1.5};
+      final double worldX = (coords['x'] as num).toDouble();
+      final double worldY = (coords['y'] as num).toDouble();
+      final double worldZ = (coords['z'] as num).toDouble();
+
+      final proyeccion =
+          _proyectarVector3DAPantalla(worldX, worldY, worldZ, screenSize);
+      final bool enPantalla = proyeccion['enPantalla'] as bool;
+      final double deltaYaw = proyeccion['deltaYaw'] as double;
+      final double distancia = proyeccion['distancia'] as double;
+      final Offset posPantalla = proyeccion['offset'] as Offset;
+      final Color color = _colorPorTipo(pin['tipo']);
+
+      puntosRadar.add({
+        "deltaYaw": deltaYaw,
+        "distancia": distancia,
+        "color": color,
+      });
+
+      if (!enPantalla) {
+        if (deltaYaw < 0) {
+          pinesIzquierda++;
+        } else {
+          pinesDerecha++;
+        }
+        continue;
+      }
+
+      final double escala =
+          (1.8 / distancia.clamp(0.8, 4.5)).clamp(0.75, 1.25);
+
+      widgetsPinesEnPantalla.add(
+        Positioned(
+          left: posPantalla.dx - 55,
+          top: posPantalla.dy - 45,
+          child: GestureDetector(
+            onTap: () => _mostrarDetallePin(pin),
+            child: Transform.scale(
+              scale: escala,
+              child: SizedBox(
+                width: 110,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 5),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.95),
+                        borderRadius: BorderRadius.circular(12),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x26000000),
+                            blurRadius: 8,
+                            offset: Offset(0, 3),
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 7,
+                            height: 7,
+                            decoration: BoxDecoration(
+                              color: color,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 5),
+                          Flexible(
+                            child: Text(
+                              "${pin['tipo']?.toString().split(' ').first ?? 'Pin'} · ${distancia.toStringAsFixed(1)}m",
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: UaqFixApp.textDark,
+                                fontSize: 10.5,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    AnimatedBuilder(
+                      animation: _pinPulseController,
+                      builder: (context, child) {
+                        return Container(
+                          width: 42,
+                          height: 42,
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            shape: BoxShape.circle,
+                            border: Border.all(color: color, width: 2.5),
+                            boxShadow: [
+                              BoxShadow(
+                                color: color.withOpacity(
+                                    0.25 + (_pinPulseController.value * 0.25)),
+                                blurRadius:
+                                    8 + (_pinPulseController.value * 8),
+                                spreadRadius:
+                                    1 + (_pinPulseController.value * 3),
+                              ),
+                            ],
+                          ),
+                          child: Icon(
+                            _iconoPorTipo(pin['tipo']),
+                            color: color,
+                            size: 20,
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    final int gradosBrj = ((_camYaw * 180 / math.pi) % 360 + 360).round() % 360;
 
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        backgroundColor: Colors.black87,
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
+        titleSpacing: 0,
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text("Visor Espacial AR",
-                style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+            const Text(
+              "UAQ Fix · Visor AR",
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w800,
+                color: UaqFixApp.textDark,
+              ),
+            ),
             Text(
-              "QR: ${widget.ubicacionQr}",
-              style: const TextStyle(fontSize: 11, color: Color(0xFF00E5FF)),
+              widget.nombreZona,
+              style: const TextStyle(
+                fontSize: 11.5,
+                color: UaqFixApp.primaryBlue,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ],
         ),
         actions: [
           IconButton(
-            tooltip: "Recargar pines de AWS",
-            onPressed: _cargarPinesDesdeAWS,
-            icon: const Icon(Icons.sync, color: Color(0xFF00E5FF)),
+            tooltip: "Recalibrar frente (0°)",
+            onPressed: _recalibrarOrigenEspacial,
+            icon: const Icon(
+              Icons.filter_center_focus_rounded,
+              color: UaqFixApp.textDark,
+              size: 21,
+            ),
           ),
-          Row(
-            children: [
-              Text(
+          IconButton(
+            tooltip: "Actualizar pines",
+            onPressed: _cargarPinesDesdeAWS,
+            icon: const Icon(
+              Icons.refresh_rounded,
+              color: UaqFixApp.primaryBlue,
+              size: 22,
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: FilterChip(
+              selected: _modoTecnico,
+              showCheckmark: false,
+              selectedColor: UaqFixApp.lightBlueBg,
+              backgroundColor: UaqFixApp.backgroundSlate,
+              side: BorderSide(
+                color: _modoTecnico
+                    ? UaqFixApp.primaryBlue
+                    : const Color(0xFFE2E8F0),
+              ),
+              avatar: Icon(
+                Icons.engineering_rounded,
+                size: 16,
+                color:
+                    _modoTecnico ? UaqFixApp.primaryBlue : UaqFixApp.textMuted,
+              ),
+              label: Text(
                 "Técnico",
                 style: TextStyle(
                   fontSize: 12,
-                  color: _modoTecnico ? Colors.amber : Colors.white70,
-                  fontWeight:
-                      _modoTecnico ? FontWeight.bold : FontWeight.normal,
+                  fontWeight: FontWeight.w600,
+                  color: _modoTecnico
+                      ? UaqFixApp.primaryBlue
+                      : UaqFixApp.textMuted,
                 ),
               ),
-              Switch(
-                value: _modoTecnico,
-                activeColor: Colors.amber,
-                onChanged: (val) => setState(() => _modoTecnico = val),
-              ),
-            ],
+              onSelected: (val) => setState(() => _modoTecnico = val),
+            ),
           ),
         ],
       ),
       body: Stack(
         children: [
-          // 1. Fondo de Cámara en Tiempo Real
+          // 1. Cámara en vivo
           if (_camaraLista && _cameraController != null)
             SizedBox.expand(
               child: CameraPreview(_cameraController!),
@@ -575,14 +1095,11 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen> {
             Container(
               color: const Color(0xFF0F172A),
               child: const Center(
-                child: Text(
-                  "Iniciando visor óptico AR...",
-                  style: TextStyle(color: Colors.white54),
-                ),
+                child: CircularProgressIndicator(color: Colors.white),
               ),
             ),
 
-          // 2. Capa de Detección de Toques para Anclar Nuevos Pines
+          // 2. Superficie táctil para colocar nuevos pines
           GestureDetector(
             behavior: HitTestBehavior.translucent,
             onTapUp: (details) {
@@ -595,195 +1112,253 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen> {
             ),
           ),
 
-          // 3. Mira Central HUD (Referencia de Calibración (0,0,0))
+          // 3. Retícula central minimalista
           IgnorePointer(
             child: Center(
               child: Container(
-                width: 60,
-                height: 60,
+                width: 44,
+                height: 44,
                 decoration: BoxDecoration(
                   border: Border.all(
-                      color: Colors.white.withOpacity(0.25), width: 1),
+                    color: Colors.white.withOpacity(0.55),
+                    width: 1.2,
+                  ),
                   shape: BoxShape.circle,
                 ),
-                child: const Center(
-                  child: Icon(Icons.add, color: Colors.white38, size: 20),
+                child: Center(
+                  child: Container(
+                    width: 5,
+                    height: 5,
+                    decoration: const BoxDecoration(
+                      color: Colors.white,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
                 ),
               ),
             ),
           ),
 
-          // 4. Renderizado de los Pines AR Activos traídos de DynamoDB
-          ..._pinesActivos.map((pin) {
-            final coords = pin['coordenadas_ar'] ?? {'x': 0.0, 'y': 0.0, 'z': -1.5};
-            final double x = (coords['x'] as num).toDouble();
-            final double y = (coords['y'] as num).toDouble();
-            final double z = (coords['z'] as num).toDouble();
+          // 4. Pines AR proyectados en 3D
+          ...widgetsPinesEnPantalla,
 
-            final posPantalla = _coordenadasARAPantalla(x, y, screenSize);
-            final color = _colorPorTipo(pin['tipo']);
-
-            // Escala visual según la distancia Z (más cerca = más grande)
-            final double escala = (2.2 / z.abs().clamp(0.8, 4.0)).clamp(0.75, 1.35);
-
-            return Positioned(
-              left: posPantalla.dx - 32,
-              top: posPantalla.dy - 32,
-              child: GestureDetector(
-                onTap: () => _mostrarDetallePin(pin),
-                child: Transform.scale(
-                  scale: escala,
-                  child: Column(
+          // 5. Indicadores laterales cuando hay pines detrás o a los lados
+          if (pinesIzquierda > 0)
+            Positioned(
+              left: 12,
+              top: screenSize.height * 0.42,
+              child: IgnorePointer(
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.92),
+                    borderRadius: BorderRadius.circular(20),
+                    boxShadow: const [
+                      BoxShadow(color: Color(0x22000000), blurRadius: 8)
+                    ],
+                  ),
+                  child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: Colors.black87,
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: color, width: 1.5),
-                        ),
-                        child: Text(
-                          "${pin['tipo']?.toString().split(' ').first ?? 'Pin'} (${z.abs()}m)",
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 3),
-                      Container(
-                        width: 44,
-                        height: 44,
-                        decoration: BoxDecoration(
-                          color: color.withOpacity(0.25),
-                          shape: BoxShape.circle,
-                          border: Border.all(color: color, width: 2.5),
-                          boxShadow: [
-                            BoxShadow(
-                              color: color.withOpacity(0.6),
-                              blurRadius: 12,
-                              spreadRadius: 2,
-                            ),
-                          ],
-                        ),
-                        child: Icon(
-                          _iconoPorTipo(pin['tipo']),
-                          color: Colors.white,
-                          size: 24,
+                      const Icon(Icons.chevron_left_rounded,
+                          color: UaqFixApp.primaryBlue, size: 20),
+                      Text(
+                        "$pinesIzquierda",
+                        style: const TextStyle(
+                          color: UaqFixApp.primaryBlue,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 12,
                         ),
                       ),
                     ],
                   ),
                 ),
-              ),
-            );
-          }),
-
-          // 5. Indicador de punto temporal mientras se llena el formulario
-          if (_puntoTemporalPantalla != null)
-            Positioned(
-              left: _puntoTemporalPantalla!.dx - 24,
-              top: _puntoTemporalPantalla!.dy - 24,
-              child: const Icon(
-                Icons.my_location,
-                color: Color(0xFF00E5FF),
-                size: 48,
               ),
             ),
 
-          // 6. HUD Superior: Estado de conexión con AWS y Contador de Pines
-          Positioned(
-            top: 14,
-            left: 14,
-            right: 14,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Container(
+          if (pinesDerecha > 0)
+            Positioned(
+              right: 12,
+              top: screenSize.height * 0.42,
+              child: IgnorePointer(
+                child: Container(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                   decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.75),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xFF00E5FF)),
+                    color: Colors.white.withOpacity(0.92),
+                    borderRadius: BorderRadius.circular(20),
+                    boxShadow: const [
+                      BoxShadow(color: Color(0x22000000), blurRadius: 8)
+                    ],
                   ),
                   child: Row(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      if (_cargandoPines)
-                        const SizedBox(
-                          width: 14,
-                          height: 14,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Color(0xFF00E5FF),
-                          ),
-                        )
-                      else
-                        const Icon(Icons.view_in_ar,
-                            color: Color(0xFF00E5FF), size: 18),
-                      const SizedBox(width: 8),
                       Text(
-                        _cargandoPines
-                            ? "Sincronizando AWS..."
-                            : "Pines Activos: ${_pinesActivos.length}",
+                        "$pinesDerecha",
                         style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 13,
+                          color: UaqFixApp.primaryBlue,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 12,
                         ),
                       ),
+                      const Icon(Icons.chevron_right_rounded,
+                          color: UaqFixApp.primaryBlue, size: 20),
                     ],
                   ),
                 ),
-                if (_modoTecnico)
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: Colors.amber.withOpacity(0.9),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: const Row(
-                      children: [
-                        Icon(Icons.admin_panel_settings,
-                            color: Colors.black, size: 16),
-                        SizedBox(width: 4),
-                        Text(
-                          "MODO MANTENIMIENTO",
-                          style: TextStyle(
-                            color: Colors.black,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 11,
+              ),
+            ),
+
+          // 6. Indicador de toque temporal
+          if (_puntoTemporalPantalla != null)
+            Positioned(
+              left: _puntoTemporalPantalla!.dx - 22,
+              top: _puntoTemporalPantalla!.dy - 22,
+              child: Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: UaqFixApp.primaryBlue.withOpacity(0.2),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white, width: 2),
+                ),
+                child: const Icon(
+                  Icons.add_rounded,
+                  color: Colors.white,
+                  size: 24,
+                ),
+              ),
+            ),
+
+          // 7. HUD Superior: Contador de Pines + Radar Espacial 360°
+          Positioned(
+            top: 14,
+            left: 16,
+            right: 16,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.92),
+                        borderRadius: BorderRadius.circular(24),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x18000000),
+                            blurRadius: 10,
+                            offset: Offset(0, 3),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (_cargandoPines)
+                            const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: UaqFixApp.primaryBlue,
+                              ),
+                            )
+                          else
+                            const Icon(
+                              Icons.place_rounded,
+                              color: UaqFixApp.primaryBlue,
+                              size: 17,
+                            ),
+                          const SizedBox(width: 6),
+                          Text(
+                            _cargandoPines
+                                ? "Sincronizando..."
+                                : "${_pinesActivos.length} Pines · $gradosBrj°",
+                            style: const TextStyle(
+                              color: UaqFixApp.textDark,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 12.5,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
+                  ],
+                ),
+
+                // Mini-Radar 360° minimalista (muestra los pines delante, a los lados y atrás)
+                Container(
+                  width: 64,
+                  height: 64,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.92),
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                        color: const Color(0xFFDBEAFE), width: 1.5),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Color(0x18000000),
+                        blurRadius: 10,
+                        offset: Offset(0, 3),
+                      ),
+                    ],
                   ),
+                  child: CustomPaint(
+                    painter: _Radar360Painter(puntos: puntosRadar),
+                  ),
+                ),
               ],
             ),
           ),
 
-          // 7. Instrucción flotante inferior
+          // 8. Guía inferior minimalista
           Positioned(
-            bottom: 20,
+            bottom: 24,
             left: 20,
             right: 20,
             child: IgnorePointer(
               child: Container(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.75),
-                  borderRadius: BorderRadius.circular(30),
-                  border: Border.all(color: Colors.white24),
+                  color: Colors.white.withOpacity(0.92),
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x1F000000),
+                      blurRadius: 12,
+                      offset: Offset(0, 4),
+                    ),
+                  ],
                 ),
-                child: const Text(
-                  "👆 Toca cualquier punto sobre la cámara para fijar un Pin AR, o toca un pin existente para ver su diagnóstico.",
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.white, fontSize: 12),
+                child: const Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.threesixty_rounded,
+                      color: UaqFixApp.primaryBlue,
+                      size: 18,
+                    ),
+                    SizedBox(width: 10),
+                    Flexible(
+                      child: Text(
+                        "Toca para anclar un pin 3D o gira 360° guiándote con el radar superior",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: UaqFixApp.textDark,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -792,4 +1367,66 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen> {
       ),
     );
   }
+}
+
+// Pintor del Radar Espacial 360° en la esquina superior derecha
+class _Radar360Painter extends CustomPainter {
+  final List<Map<String, dynamic>> puntos;
+
+  _Radar360Painter({required this.puntos});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Offset center = Offset(size.width / 2, size.height / 2);
+    final double radius = size.width / 2 - 6;
+
+    // Cono de visión frontal de la cámara (hacia arriba en el radar)
+    final Paint fovPaint = Paint()
+      ..color = UaqFixApp.primaryBlue.withOpacity(0.15)
+      ..style = PaintingStyle.fill;
+
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius),
+      -math.pi / 2 - 0.49,
+      0.98,
+      true,
+      fovPaint,
+    );
+
+    // Anillo interior de referencia
+    final Paint ringPaint = Paint()
+      ..color = const Color(0xFFE2E8F0)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.0;
+    canvas.drawCircle(center, radius * 0.55, ringPaint);
+
+    // Punto central (Usuario)
+    final Paint userPaint = Paint()
+      ..color = UaqFixApp.primaryBlue
+      ..style = PaintingStyle.fill;
+    canvas.drawCircle(center, 3.0, userPaint);
+
+    // Dibujar cada pin en su ángulo relativo (0° = arriba/frente, 180° = abajo/atrás)
+    for (final p in puntos) {
+      final double deltaYaw = p['deltaYaw'] as double;
+      final double dist = (p['distancia'] as double).clamp(0.5, 5.0);
+      final Color color = p['color'] as Color;
+
+      final double rNorm = (dist / 5.0) * (radius - 3);
+      final double angleCanvas = deltaYaw - (math.pi / 2);
+
+      final Offset dotPos = Offset(
+        center.dx + rNorm * math.cos(angleCanvas),
+        center.dy + rNorm * math.sin(angleCanvas),
+      );
+
+      final Paint dotPaint = Paint()
+        ..color = color
+        ..style = PaintingStyle.fill;
+      canvas.drawCircle(dotPos, 3.8, dotPaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _Radar360Painter oldDelegate) => true;
 }
