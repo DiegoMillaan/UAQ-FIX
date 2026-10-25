@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:sensors_plus/sensors_plus.dart';
+import 'package:vector_math/vector_math_64.dart' as vm;
 import 'api_service.dart';
 import 'main.dart';
 
@@ -24,31 +25,37 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
     with SingleTickerProviderStateMixin {
   CameraController? _cameraController;
   bool _camaraLista = false;
+  bool _cerrandoPantalla = false;
 
   List<Map<String, dynamic>> _pinesActivos = [];
   bool _cargandoPines = true;
   bool _modoTecnico = false;
 
-  // Subscripciones de Fusión de Sensores (Giroscopio + Acelerómetro a 50Hz)
+  // Subscripciones de Sensores (Giroscopio + Acelerómetro)
   StreamSubscription<GyroscopeEvent>? _gyroSub;
   StreamSubscription<AccelerometerEvent>? _accelSub;
 
-  // Orientación espacial 3D de la cámara en radianes
-  // _camYaw: [-pi, pi] (0 = frente al QR, pi/-pi = pared de atrás 180°)
-  // _camPitch: [-pi/2, pi/2] (0 = horizonte nivelado, + = mirando arriba, - = abajo)
-  double _camYaw = 0.0;
-  double _camPitch = 0.0;
+  // Matriz de Rotación 3D de Dispositivo a Mundo (R_WC)
+  // Transforma cualquier vector de la cámara al salón: v_world = _rotWC * v_dev
+  vm.Matrix3 _rotWC = vm.Matrix3.identity();
+  vm.Matrix3 _rotRenderWC = vm.Matrix3.identity();
+  bool _orientacionInicializada = false;
   DateTime? _ultimoEventoGyro;
 
-  // Vector de gravedad normalizado (Acelerómetro) para anclar la vertical real
-  double _gravX = 0.0;
-  double _gravY = 9.81;
-  double _gravZ = 0.0;
-  bool _pitchInicializado = false;
+  // Vector de gravedad medido en coordenadas del teléfono
+  vm.Vector3 _gravDev = vm.Vector3(0.0, 9.81, 0.0);
+  double _ultimoVelAngularMag = 0.0;
 
-  // Campo de visión óptico real de cámara trasera en modo vertical (en radianes)
-  static const double _fovHorizontalRad = 0.98; // ~56 grados horizontales
-  static const double _fovVerticalRad = 1.32;   // ~75 grados verticales
+  // Posición 3D del usuario en el salón (en metros)
+  vm.Vector3 _userPos = vm.Vector3.zero();
+
+  // Detector de pasos estricto (solo cuando el usuario camina realmente, sin rotar el teléfono)
+  bool _caminataAutoActiva = false;
+  DateTime _ultimoPaso = DateTime.now();
+  double _gravMagFiltrada = 9.81;
+
+  // Apertura horizontal óptica de cámara trasera en modo retrato (~53 grados)
+  static const double _tanHalfFovH = 0.498; // tan(26.5°)
 
   Offset? _puntoTemporalPantalla;
   late AnimationController _pinPulseController;
@@ -58,11 +65,11 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
     super.initState();
     _pinPulseController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1500),
+      duration: const Duration(milliseconds: 1600),
     )..repeat(reverse: true);
 
     _inicializarCamara();
-    _iniciarFusionDeSensores3D();
+    _iniciarMotorMatricial3D();
     _cargarPinesDesdeAWS();
   }
 
@@ -70,110 +77,282 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
     try {
       final cameras = await availableCameras();
       if (cameras.isNotEmpty) {
-        _cameraController = CameraController(
+        final controller = CameraController(
           cameras.first,
           ResolutionPreset.high,
           enableAudio: false,
         );
-        await _cameraController!.initialize();
-        if (mounted) {
-          setState(() => _camaraLista = true);
+        await controller.initialize();
+        if (mounted && !_cerrandoPantalla) {
+          setState(() {
+            _cameraController = controller;
+            _camaraLista = true;
+          });
+        } else {
+          await controller.dispose();
         }
       }
     } catch (e) {
-      debugPrint("Aviso cámara: $e");
+      debugPrint("Aviso cámara AR: $e");
     }
   }
 
-  // Normaliza cualquier ángulo al rango [-pi, pi] para permitir giros infinitos de 360°
-  double _normalizarAngulo(double anguloRad) {
-    double a = (anguloRad + math.pi) % (2 * math.pi);
-    if (a < 0) a += 2 * math.pi;
-    return a - math.pi;
+  Future<void> _salirDePantallaAR() async {
+    if (_cerrandoPantalla) return;
+    setState(() {
+      _cerrandoPantalla = true;
+      _camaraLista = false;
+    });
+
+    _gyroSub?.cancel();
+    _accelSub?.cancel();
+
+    try {
+      final cam = _cameraController;
+      _cameraController = null;
+      await cam?.dispose();
+    } catch (_) {}
+
+    if (mounted) {
+      Navigator.of(context).pop();
+    }
   }
 
-  // Fusión de Sensores 3D: Acelerómetro (Gravedad absoluta) + Giroscopio (Alta velocidad 50Hz)
-  void _iniciarFusionDeSensores3D() {
-    // 1. Acelerómetro: Mantiene el ángulo vertical (Pitch) clavado al horizonte real sin deriva
+  // Construye una matriz 3D inicial alineada exactamente con la gravedad real del salón
+  vm.Matrix3 _construirMatrizDesdeGravedad(vm.Vector3 upDev) {
+    final vm.Vector3 yW = upDev.normalized();
+    // Eje frontal de la cámara trasera es (0, 0, -1)
+    vm.Vector3 forwardDev = vm.Vector3(0.0, 0.0, -1.0);
+    if (yW.dot(forwardDev).abs() > 0.95) {
+      forwardDev = vm.Vector3(0.0, 1.0, 0.0);
+    }
+    // Right = Forward x Up
+    final vm.Vector3 xW = forwardDev.cross(yW).normalized();
+    // Back (+Z_world) = Right x Up
+    final vm.Vector3 zW = xW.cross(yW).normalized();
+
+    // xW, yW, zW son las filas de R_WC
+    return vm.Matrix3(
+      xW.x, yW.x, zW.x,
+      xW.y, yW.y, zW.y,
+      xW.z, yW.z, zW.z,
+    );
+  }
+
+  // Re-ortonormaliza la matriz 3x3 para evitar cualquier deformación numérica
+  void _ortonormalizarMatriz(vm.Matrix3 m) {
+    vm.Vector3 r0 = m.row0.normalized();
+    vm.Vector3 r1 = m.row1;
+    r1 = (r1 - r0 * r0.dot(r1)).normalized();
+    vm.Vector3 r2 = r0.cross(r1).normalized();
+
+    m.setRow(0, r0);
+    m.setRow(1, r1);
+    m.setRow(2, r2);
+  }
+
+  void _iniciarMotorMatricial3D() {
+    // 1. Acelerómetro: Mide el vector "Arriba" (Gravedad) real en 3D
     _accelSub = accelerometerEventStream(
       samplingPeriod: SensorInterval.gameInterval,
     ).listen((AccelerometerEvent event) {
-      // Filtro paso-bajo suave para aislar la gravedad de sacudidas de la mano
-      _gravX = _gravX * 0.85 + event.x * 0.15;
-      _gravY = _gravY * 0.85 + event.y * 0.15;
-      _gravZ = _gravZ * 0.85 + event.z * 0.15;
+      final vm.Vector3 lectura = vm.Vector3(event.x, event.y, event.z);
+      final double mag = lectura.length;
+      if (mag < 1.0) return;
 
-      final double normG = math.sqrt(
-        _gravX * _gravX + _gravY * _gravY + _gravZ * _gravZ,
-      );
-      if (normG < 1.0) return;
+      _gravDev = _gravDev * 0.88 + lectura * 0.12;
 
-      // En vertical: Y apunta arriba, Z apunta hacia el usuario.
-      // Al inclinar la cámara hacia el techo, Z se vuelve positivo.
-      final double pitchGravedad = math.atan2(
-        _gravZ,
-        math.sqrt(_gravX * _gravX + _gravY * _gravY),
-      );
+      if (!_orientacionInicializada && _gravDev.length > 5.0) {
+        _rotWC = _construirMatrizDesdeGravedad(_gravDev);
+        _rotRenderWC = _rotWC.clone();
+        _orientacionInicializada = true;
+      }
 
-      if (!_pitchInicializado) {
-        _camPitch = pitchGravedad;
-        _pitchInicializado = true;
-      } else {
-        // Filtro complementario: corrige cualquier deriva vertical con la gravedad real
-        _camPitch = _camPitch * 0.92 + pitchGravedad * 0.08;
+      // Podómetro opcional: solo cuenta pasos si el modo está activo y el teléfono NO está girando
+      if (_caminataAutoActiva && _ultimoVelAngularMag < 0.22) {
+        _gravMagFiltrada = _gravMagFiltrada * 0.7 + mag * 0.3;
+        final double picoVertical = (_gravMagFiltrada - 9.81);
+        final ahora = DateTime.now();
+        if (picoVertical > 2.4 &&
+            ahora.difference(_ultimoPaso).inMilliseconds > 550) {
+          _ultimoPaso = ahora;
+          _avanzarEnElSalon(0.45);
+        }
       }
     });
 
-    // 2. Giroscopio a 50Hz: Proyecta la rotación sobre el vector de gravedad real del salón
+    // 2. Giroscopio 3D + Filtro Complementario Mahony (Cero inversión de ejes y cero deriva)
     _gyroSub = gyroscopeEventStream(
       samplingPeriod: SensorInterval.gameInterval,
     ).listen((GyroscopeEvent event) {
       final ahora = DateTime.now();
-      if (_ultimoEventoGyro != null) {
-        final double dt =
-            ahora.difference(_ultimoEventoGyro!).inMicroseconds / 1000000.0;
-
-        if (dt > 0.0 && dt < 0.2) {
-          final double normG = math.sqrt(
-            _gravX * _gravX + _gravY * _gravY + _gravZ * _gravZ,
-          );
-
-          // Vector unitario "Arriba" del mundo real respecto a la postura actual del teléfono
-          final double ux = normG > 1.0 ? (_gravX / normG) : 0.0;
-          final double uy = normG > 1.0 ? (_gravY / normG) : 1.0;
-          final double uz = normG > 1.0 ? (_gravZ / normG) : 0.0;
-
-          // Zona muerta mínima solo para ruido electrónico en reposo
-          final double wx = event.x.abs() > 0.008 ? event.x : 0.0;
-          final double wy = event.y.abs() > 0.008 ? event.y : 0.0;
-          final double wz = event.z.abs() > 0.008 ? event.z : 0.0;
-
-          if (wx != 0.0 || wy != 0.0 || wz != 0.0) {
-            // Producto punto: velocidad de giro horizontal real en el cuarto (independiente de la inclinación)
-            final double yawRate = -(wx * ux + wy * uy + wz * uz);
-            final double pitchRate = wx;
-
-            setState(() {
-              _camYaw = _normalizarAngulo(_camYaw + yawRate * dt);
-              _camPitch = (_camPitch + pitchRate * dt)
-                  .clamp(-math.pi / 2.1, math.pi / 2.1);
-            });
-          }
-        }
+      if (_ultimoEventoGyro == null) {
+        _ultimoEventoGyro = ahora;
+        return;
       }
+
+      final double dt =
+          ahora.difference(_ultimoEventoGyro!).inMicroseconds / 1000000.0;
       _ultimoEventoGyro = ahora;
+
+      if (dt <= 0.0 || dt > 0.2 || !_orientacionInicializada) return;
+
+      // Zona muerta suave para eliminar el pulso de la mano cuando sostienes el celular fijo
+      const double deadzone = 0.022;
+      final double gx = event.x.abs() > deadzone
+          ? event.x - event.x.sign * deadzone
+          : 0.0;
+      final double gy = event.y.abs() > deadzone
+          ? event.y - event.y.sign * deadzone
+          : 0.0;
+      final double gz = event.z.abs() > deadzone
+          ? event.z - event.z.sign * deadzone
+          : 0.0;
+
+      vm.Vector3 omega = vm.Vector3(gx, gy, gz);
+      _ultimoVelAngularMag = omega.length;
+
+      // Corrección continua de Horizonte (Pitch y Roll) con el vector de Gravedad
+      final double gravNorm = _gravDev.length;
+      if ((gravNorm - 9.81).abs() < 1.5) {
+        final vm.Vector3 uAccel = _gravDev / gravNorm;
+        // La fila 1 de _rotWC es el vector "Arriba" estimado en coordenadas del teléfono
+        final vm.Vector3 uEst = _rotWC.row1;
+        // Producto cruz exacto que alinea el horizonte sin invertir ningún eje
+        final vm.Vector3 errorTilt = uEst.cross(uAccel);
+        omega += errorTilt * 1.85;
+      }
+
+      // Integración 3D exacta por fórmula de Rodrigues: R_new = R_old * exp([omega * dt]x)
+      final double angle = omega.length * dt;
+      if (angle > 0.0001) {
+        final vm.Vector3 axis = omega.normalized();
+        final double s = math.sin(angle);
+        final double c = math.cos(angle);
+        final double oc = 1.0 - c;
+
+        final double x = axis.x, y = axis.y, z = axis.z;
+        final vm.Matrix3 deltaR = vm.Matrix3(
+          c + x * x * oc,     x * y * oc + z * s, x * z * oc - y * s,
+          y * x * oc - z * s, c + y * y * oc,     y * z * oc + x * s,
+          z * x * oc + y * s, z * y * oc - x * s, c + z * z * oc,
+        );
+
+        _rotWC = _rotWC * deltaR;
+        _ortonormalizarMatriz(_rotWC);
+      }
+
+      // Suavizado exponencial de la matriz renderizada para eliminar cualquier vibración visual
+      double diffSuma = 0.0;
+      for (int i = 0; i < 9; i++) {
+        diffSuma += (_rotWC.storage[i] - _rotRenderWC.storage[i]).abs();
+      }
+
+      if (diffSuma > 0.0015) {
+        setState(() {
+          for (int i = 0; i < 9; i++) {
+            _rotRenderWC.storage[i] = _rotRenderWC.storage[i] * 0.65 +
+                _rotWC.storage[i] * 0.35;
+          }
+          _ortonormalizarMatriz(_rotRenderWC);
+        });
+      }
     });
+  }
+
+  // Avanza o retrocede sobre el plano horizontal del salón en la dirección hacia donde miras
+  void _avanzarEnElSalon(double metros) {
+    // El eje frontal de la cámara en el mundo es _rotRenderWC * (0, 0, -1)
+    final vm.Vector3 forwardWorld =
+        _rotRenderWC.transform(vm.Vector3(0.0, 0.0, -1.0));
+    final vm.Vector3 dirHorizontal =
+        vm.Vector3(forwardWorld.x, 0.0, forwardWorld.z);
+    if (dirHorizontal.length > 0.01) {
+      dirHorizontal.normalize();
+      setState(() {
+        _userPos += dirHorizontal * metros;
+        _userPos.x = _userPos.x.clamp(-20.0, 20.0);
+        _userPos.z = _userPos.z.clamp(-20.0, 20.0);
+      });
+    }
   }
 
   void _recalibrarOrigenEspacial() {
     setState(() {
-      _camYaw = 0.0;
+      if (_gravDev.length > 1.0) {
+        _rotWC = _construirMatrizDesdeGravedad(_gravDev);
+        _rotRenderWC = _rotWC.clone();
+      } else {
+        _rotWC = vm.Matrix3.identity();
+        _rotRenderWC = vm.Matrix3.identity();
+      }
+      _userPos = vm.Vector3.zero();
     });
     _mostrarNotificacion(
       icono: Icons.center_focus_strong_rounded,
-      texto: "Frente (0°) recalibrado hacia tu dirección actual",
+      texto: "Origen (0,0,0) recalibrado a tu vista actual",
       color: UaqFixApp.primaryBlue,
     );
+  }
+
+  // Convierte el toque en pantalla en un Rayo 3D unitario en el Mundo (se congela en el instante del toque)
+  vm.Vector3 _calcularRayoMundoEnToque(Offset posicionToque, Size screenSize) {
+    final double focalPx = (screenSize.width / 2.0) / _tanHalfFovH;
+    final double xDev = (posicionToque.dx - screenSize.width / 2.0) / focalPx;
+    final double yDev = (screenSize.height / 2.0 - posicionToque.dy) / focalPx;
+    final vm.Vector3 rayDev = vm.Vector3(xDev, yDev, -1.0).normalized();
+
+    // Transforma el rayo de la cámara a coordenadas fijas del salón
+    return _rotRenderWC.transform(rayDev).normalized();
+  }
+
+  // Proyecta cualquier coordenada 3D {x, y, z} del salón a píxeles exactos en pantalla (Modelo Pinhole)
+  Map<String, dynamic> _proyectarPunto3DAPantalla(
+    double worldX,
+    double worldY,
+    double worldZ,
+    Size screenSize,
+  ) {
+    final vm.Vector3 relWorld =
+        vm.Vector3(worldX, worldY, worldZ) - _userPos;
+    final double distancia = relWorld.length.clamp(0.3, 30.0);
+
+    // Transformamos del salón a la cámara usando la transpuesta: v_dev = R_WC^T * relWorld
+    final vm.Vector3 posCam = _rotRenderWC.transposed().transform(relWorld);
+
+    final double focalPx = (screenSize.width / 2.0) / _tanHalfFovH;
+
+    // La cámara trasera mira hacia -Z. El punto está frente a la cámara si posCam.z < -0.12
+    final bool frenteACamara = posCam.z < -0.12;
+    double dx = -9999.0;
+    double dy = -9999.0;
+
+    if (frenteACamara) {
+      final double invZ = 1.0 / (-posCam.z);
+      dx = (screenSize.width / 2.0) + (posCam.x * invZ) * focalPx;
+      dy = (screenSize.height / 2.0) - (posCam.y * invZ) * focalPx;
+    }
+
+    final bool enPantalla = frenteACamara &&
+        dx >= -65.0 &&
+        dx <= screenSize.width + 65.0 &&
+        dy >= -65.0 &&
+        dy <= screenSize.height + 65.0;
+
+    // Ángulo horizontal relativo para el radar 360° y flechas laterales
+    final double deltaYaw = math.atan2(posCam.x, -posCam.z);
+
+    return {
+      "offset": Offset(dx, dy),
+      "enPantalla": enPantalla,
+      "deltaYaw": deltaYaw,
+      "distancia": distancia,
+    };
+  }
+
+  // Escala visual con perspectiva real: lejos (5m) = 0.38x, medio (1.8m) = 1.0x, cerca (0.6m) = 1.65x
+  double _calcularEscalaPorDistancia(double distanciaMetros) {
+    return (1.75 / distanciaMetros.clamp(0.45, 7.5)).clamp(0.38, 1.65);
   }
 
   Future<void> _cargarPinesDesdeAWS() async {
@@ -210,7 +389,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
         behavior: SnackBarBehavior.floating,
         backgroundColor: Colors.white,
         elevation: 6,
-        margin: const EdgeInsets.fromLTRB(16, 0, 16, 85),
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 95),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(14),
           side: BorderSide(color: color.withOpacity(0.3), width: 1),
@@ -244,75 +423,6 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
     super.dispose();
   }
 
-  // Convierte el punto tocado en pantalla + distancia (m) en un vector 3D real {x, y, z} en el salón
-  Map<String, double> _calcularVector3DMundo(
-    Offset posicionToque,
-    Size screenSize,
-    double distanciaMetros,
-  ) {
-    // Desplazamiento angular del toque respecto al centro óptico de la cámara
-    final double offsetYaw =
-        ((posicionToque.dx / screenSize.width) - 0.5) * _fovHorizontalRad;
-    final double offsetPitch =
-        (0.5 - (posicionToque.dy / screenSize.height)) * _fovVerticalRad;
-
-    final double pinYaw = _normalizarAngulo(_camYaw + offsetYaw);
-    final double pinPitch =
-        (_camPitch + offsetPitch).clamp(-math.pi / 2.1, math.pi / 2.1);
-
-    // Proyección esférica a coordenadas cartesianas 3D (en metros)
-    // Frente (0°) => Z negativo | Pared de atrás (180°) => Z positivo | Derecha (90°) => X positivo
-    final double d = distanciaMetros.abs();
-    final double worldX = d * math.cos(pinPitch) * math.sin(pinYaw);
-    final double worldY = d * math.sin(pinPitch);
-    final double worldZ = -d * math.cos(pinPitch) * math.cos(pinYaw);
-
-    return {
-      "x": double.parse(worldX.toStringAsFixed(2)),
-      "y": double.parse(worldY.toStringAsFixed(2)),
-      "z": double.parse(worldZ.toStringAsFixed(2)),
-    };
-  }
-
-  // Convierte el vector 3D {x, y, z} guardado en DynamoDB a su posición exacta en pantalla
-  Map<String, dynamic> _proyectarVector3DAPantalla(
-    double x,
-    double y,
-    double z,
-    Size screenSize,
-  ) {
-    final double distancia =
-        math.sqrt(x * x + y * y + z * z).clamp(0.4, 20.0);
-
-    // Ángulos esféricos absolutos del pin en el salón
-    final double pinYaw = math.atan2(x, -z);
-    final double pinPitch = math.asin((y / distancia).clamp(-1.0, 1.0));
-
-    // Diferencia angular respecto a hacia dónde mira la cámara en este instante
-    final double deltaYaw = _normalizarAngulo(pinYaw - _camYaw);
-    final double deltaPitch = pinPitch - _camPitch;
-
-    // Solo es visible si está frente a la cámara (hemisferio frontal) y dentro del FOV
-    final bool enHemisferioFrontal = deltaYaw.abs() < (math.pi / 2.0);
-    final double dx =
-        (0.5 + (deltaYaw / _fovHorizontalRad)) * screenSize.width;
-    final double dy =
-        (0.5 - (deltaPitch / _fovVerticalRad)) * screenSize.height;
-
-    final bool enPantalla = enHemisferioFrontal &&
-        dx >= -45 &&
-        dx <= screenSize.width + 45 &&
-        dy >= -45 &&
-        dy <= screenSize.height + 45;
-
-    return {
-      "offset": Offset(dx, dy),
-      "enPantalla": enPantalla,
-      "deltaYaw": deltaYaw,
-      "distancia": distancia,
-    };
-  }
-
   Color _colorPorTipo(String? tipo) {
     switch (tipo) {
       case 'Riesgo Crítico (Industria 4.0)':
@@ -339,9 +449,13 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
     }
   }
 
-  // Modal minimalista claro para crear un nuevo Pin AR
+  // Modal minimalista claro: CONGELA el rayo 3D en el instante exacto del toque
   void _mostrarFormularioNuevoPin(Offset toque, Size screenSize) {
-    double distanciaMetros = 1.5;
+    // Congelamos la dirección 3D y posición en el milisegundo en que el usuario tocó la pantalla
+    final vm.Vector3 rayoCongelado = _calcularRayoMundoEnToque(toque, screenSize);
+    final vm.Vector3 origenCongelado = _userPos.clone();
+
+    double distanciaMetros = 2.0;
     String tipoSeleccionado = 'Redes / Cómputo';
     final TextEditingController descController = TextEditingController();
     bool enviando = false;
@@ -358,11 +472,14 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
       builder: (ctx) {
         return StatefulBuilder(
           builder: (context, setModalState) {
-            final coords3D =
-                _calcularVector3DMundo(toque, screenSize, distanciaMetros);
-            final double x = coords3D['x']!;
-            final double y = coords3D['y']!;
-            final double z = coords3D['z']!;
+            // Calculamos la coordenada usando el rayo CONGELADO (no importa si mueve el celular al escribir)
+            final vm.Vector3 posFinal =
+                origenCongelado + (rayoCongelado * distanciaMetros);
+            final double x = double.parse(posFinal.x.toStringAsFixed(2));
+            final double y = double.parse(posFinal.y.toStringAsFixed(2));
+            final double z = double.parse(posFinal.z.toStringAsFixed(2));
+            final double previewScale =
+                _calcularEscalaPorDistancia(distanciaMetros);
 
             return Padding(
               padding: EdgeInsets.only(
@@ -476,51 +593,59 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
                   ),
                   const SizedBox(height: 16),
 
-                  // Control de Distancia Radial al Objeto
+                  // Control de Profundidad con indicador de tamaño por lejanía
                   Container(
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 8),
+                        horizontal: 14, vertical: 10),
                     decoration: BoxDecoration(
                       color: UaqFixApp.backgroundSlate,
                       borderRadius: BorderRadius.circular(12),
                       border: Border.all(color: const Color(0xFFE2E8F0)),
                     ),
-                    child: Row(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Icon(
-                          Icons.straighten_rounded,
-                          size: 18,
-                          color: UaqFixApp.textMuted,
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            const Row(
+                              children: [
+                                Icon(
+                                  Icons.straighten_rounded,
+                                  size: 18,
+                                  color: UaqFixApp.textMuted,
+                                ),
+                                SizedBox(width: 8),
+                                Text(
+                                  "Profundidad en el salón:",
+                                  style: TextStyle(
+                                    color: UaqFixApp.textDark,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            Text(
+                              "${distanciaMetros.toStringAsFixed(1)} m (${distanciaMetros <= 1.2 ? 'Cerca' : distanciaMetros >= 3.5 ? 'Fondo' : 'Media'}) · Escala ${(previewScale * 100).round()}%",
+                              style: const TextStyle(
+                                color: UaqFixApp.primaryBlue,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 11.5,
+                              ),
+                            ),
+                          ],
                         ),
-                        const SizedBox(width: 8),
-                        const Text(
-                          "Distancia:",
-                          style: TextStyle(
-                            color: UaqFixApp.textDark,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                        Expanded(
-                          child: Slider(
-                            value: distanciaMetros,
-                            min: 0.5,
-                            max: 5.0,
-                            divisions: 9,
-                            activeColor: UaqFixApp.primaryBlue,
-                            inactiveColor: const Color(0xFFDBEAFE),
-                            onChanged: (val) {
-                              setModalState(() => distanciaMetros = val);
-                            },
-                          ),
-                        ),
-                        Text(
-                          "${distanciaMetros.toStringAsFixed(1)} m",
-                          style: const TextStyle(
-                            color: UaqFixApp.primaryBlue,
-                            fontWeight: FontWeight.w700,
-                            fontSize: 13,
-                          ),
+                        Slider(
+                          value: distanciaMetros,
+                          min: 0.6,
+                          max: 6.0,
+                          divisions: 18,
+                          activeColor: UaqFixApp.primaryBlue,
+                          inactiveColor: const Color(0xFFDBEAFE),
+                          onChanged: (val) {
+                            setModalState(() => distanciaMetros = val);
+                          },
                         ),
                       ],
                     ),
@@ -536,7 +661,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
                     ),
                     decoration: const InputDecoration(
                       labelText: "Descripción del desperfecto",
-                      hintText: "Ej. Nodo de red sin señal en mesa 2...",
+                      hintText: "Ej. Contacto dañado en la esquina del fondo...",
                       hintStyle: TextStyle(color: Color(0xFF94A3B8)),
                       prefixIcon: Icon(
                         Icons.description_outlined,
@@ -586,7 +711,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
                                 _mostrarNotificacion(
                                   icono: Icons.check_circle_outline_rounded,
                                   texto:
-                                      "Pin AR anclado en las coordenadas 3D del salón",
+                                      "Pin AR fijado exactamente a ${distanciaMetros.toStringAsFixed(1)}m",
                                   color: const Color(0xFF0D9488),
                                 );
                                 _cargarPinesDesdeAWS();
@@ -633,8 +758,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
     });
   }
 
-  // Modal minimalista claro para inspeccionar y resolver un Pin AR
-  void _mostrarDetallePin(Map<String, dynamic> pin) {
+  void _mostrarDetallePin(Map<String, dynamic> pin, double distanciaActual) {
     final coords = pin['coordenadas_ar'] ?? {'x': 0, 'y': 0, 'z': -1.5};
     final color = _colorPorTipo(pin['tipo']);
     bool resolviendo = false;
@@ -691,9 +815,10 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
                             ),
                             const SizedBox(height: 2),
                             Text(
-                              "Nodo: ${pin['ubicacion_qr']}",
+                              "Distancia actual: ${distanciaActual.toStringAsFixed(1)} metros",
                               style: const TextStyle(
-                                color: UaqFixApp.textMuted,
+                                color: UaqFixApp.primaryBlue,
+                                fontWeight: FontWeight.w600,
                                 fontSize: 12,
                               ),
                             ),
@@ -757,9 +882,9 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
                             ),
                             const SizedBox(width: 6),
                             Text(
-                              "Vector 3D: X: ${coords['x']}m, Y: ${coords['y']}m, Z: ${coords['z']}m",
+                              "Coordenada fija: X: ${coords['x']}m, Y: ${coords['y']}m, Z: ${coords['z']}m",
                               style: const TextStyle(
-                                color: UaqFixApp.primaryBlue,
+                                color: UaqFixApp.textMuted,
                                 fontSize: 12,
                                 fontWeight: FontWeight.w600,
                               ),
@@ -871,505 +996,619 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
 
   @override
   Widget build(BuildContext context) {
-    final screenSize = MediaQuery.of(context).size;
-    int pinesIzquierda = 0;
-    int pinesDerecha = 0;
-    final List<Map<String, dynamic>> puntosRadar = [];
-
-    // Pre-calculamos la proyección 3D de todos los pines activos
-    final List<Widget> widgetsPinesEnPantalla = [];
-
-    for (final pin in _pinesActivos) {
-      final coords = pin['coordenadas_ar'] ?? {'x': 0.0, 'y': 0.0, 'z': -1.5};
-      final double worldX = (coords['x'] as num).toDouble();
-      final double worldY = (coords['y'] as num).toDouble();
-      final double worldZ = (coords['z'] as num).toDouble();
-
-      final proyeccion =
-          _proyectarVector3DAPantalla(worldX, worldY, worldZ, screenSize);
-      final bool enPantalla = proyeccion['enPantalla'] as bool;
-      final double deltaYaw = proyeccion['deltaYaw'] as double;
-      final double distancia = proyeccion['distancia'] as double;
-      final Offset posPantalla = proyeccion['offset'] as Offset;
-      final Color color = _colorPorTipo(pin['tipo']);
-
-      puntosRadar.add({
-        "deltaYaw": deltaYaw,
-        "distancia": distancia,
-        "color": color,
-      });
-
-      if (!enPantalla) {
-        if (deltaYaw < 0) {
-          pinesIzquierda++;
-        } else {
-          pinesDerecha++;
-        }
-        continue;
-      }
-
-      final double escala =
-          (1.8 / distancia.clamp(0.8, 4.5)).clamp(0.75, 1.25);
-
-      widgetsPinesEnPantalla.add(
-        Positioned(
-          left: posPantalla.dx - 55,
-          top: posPantalla.dy - 45,
-          child: GestureDetector(
-            onTap: () => _mostrarDetallePin(pin),
-            child: Transform.scale(
-              scale: escala,
-              child: SizedBox(
-                width: 110,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 5),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.95),
-                        borderRadius: BorderRadius.circular(12),
-                        boxShadow: const [
-                          BoxShadow(
-                            color: Color(0x26000000),
-                            blurRadius: 8,
-                            offset: Offset(0, 3),
-                          ),
-                        ],
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                            width: 7,
-                            height: 7,
-                            decoration: BoxDecoration(
-                              color: color,
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          const SizedBox(width: 5),
-                          Flexible(
-                            child: Text(
-                              "${pin['tipo']?.toString().split(' ').first ?? 'Pin'} · ${distancia.toStringAsFixed(1)}m",
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: UaqFixApp.textDark,
-                                fontSize: 10.5,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 5),
-                    AnimatedBuilder(
-                      animation: _pinPulseController,
-                      builder: (context, child) {
-                        return Container(
-                          width: 42,
-                          height: 42,
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            shape: BoxShape.circle,
-                            border: Border.all(color: color, width: 2.5),
-                            boxShadow: [
-                              BoxShadow(
-                                color: color.withOpacity(
-                                    0.25 + (_pinPulseController.value * 0.25)),
-                                blurRadius:
-                                    8 + (_pinPulseController.value * 8),
-                                spreadRadius:
-                                    1 + (_pinPulseController.value * 3),
-                              ),
-                            ],
-                          ),
-                          child: Icon(
-                            _iconoPorTipo(pin['tipo']),
-                            color: color,
-                            size: 20,
-                          ),
-                        );
-                      },
-                    ),
-                  ],
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        _salirDePantallaAR();
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        appBar: AppBar(
+          backgroundColor: Colors.white,
+          surfaceTintColor: Colors.white,
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 20),
+            onPressed: _salirDePantallaAR,
+          ),
+          titleSpacing: 0,
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                "UAQ Fix · Visor AR",
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w800,
+                  color: UaqFixApp.textDark,
                 ),
               ),
-            ),
-          ),
-        ),
-      );
-    }
-
-    final int gradosBrj = ((_camYaw * 180 / math.pi) % 360 + 360).round() % 360;
-
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        surfaceTintColor: Colors.white,
-        titleSpacing: 0,
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              "UAQ Fix · Visor AR",
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w800,
-                color: UaqFixApp.textDark,
-              ),
-            ),
-            Text(
-              widget.nombreZona,
-              style: const TextStyle(
-                fontSize: 11.5,
-                color: UaqFixApp.primaryBlue,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          IconButton(
-            tooltip: "Recalibrar frente (0°)",
-            onPressed: _recalibrarOrigenEspacial,
-            icon: const Icon(
-              Icons.filter_center_focus_rounded,
-              color: UaqFixApp.textDark,
-              size: 21,
-            ),
-          ),
-          IconButton(
-            tooltip: "Actualizar pines",
-            onPressed: _cargarPinesDesdeAWS,
-            icon: const Icon(
-              Icons.refresh_rounded,
-              color: UaqFixApp.primaryBlue,
-              size: 22,
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.only(right: 8),
-            child: FilterChip(
-              selected: _modoTecnico,
-              showCheckmark: false,
-              selectedColor: UaqFixApp.lightBlueBg,
-              backgroundColor: UaqFixApp.backgroundSlate,
-              side: BorderSide(
-                color: _modoTecnico
-                    ? UaqFixApp.primaryBlue
-                    : const Color(0xFFE2E8F0),
-              ),
-              avatar: Icon(
-                Icons.engineering_rounded,
-                size: 16,
-                color:
-                    _modoTecnico ? UaqFixApp.primaryBlue : UaqFixApp.textMuted,
-              ),
-              label: Text(
-                "Técnico",
-                style: TextStyle(
-                  fontSize: 12,
+              Text(
+                widget.nombreZona,
+                style: const TextStyle(
+                  fontSize: 11.5,
+                  color: UaqFixApp.primaryBlue,
                   fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            IconButton(
+              tooltip: "Recalibrar origen (0,0,0)",
+              onPressed: _recalibrarOrigenEspacial,
+              icon: const Icon(
+                Icons.filter_center_focus_rounded,
+                color: UaqFixApp.textDark,
+                size: 21,
+              ),
+            ),
+            IconButton(
+              tooltip: "Actualizar pines",
+              onPressed: _cargarPinesDesdeAWS,
+              icon: const Icon(
+                Icons.refresh_rounded,
+                color: UaqFixApp.primaryBlue,
+                size: 22,
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: FilterChip(
+                selected: _modoTecnico,
+                showCheckmark: false,
+                selectedColor: UaqFixApp.lightBlueBg,
+                backgroundColor: UaqFixApp.backgroundSlate,
+                side: BorderSide(
+                  color: _modoTecnico
+                      ? UaqFixApp.primaryBlue
+                      : const Color(0xFFE2E8F0),
+                ),
+                avatar: Icon(
+                  Icons.engineering_rounded,
+                  size: 16,
                   color: _modoTecnico
                       ? UaqFixApp.primaryBlue
                       : UaqFixApp.textMuted,
                 ),
-              ),
-              onSelected: (val) => setState(() => _modoTecnico = val),
-            ),
-          ),
-        ],
-      ),
-      body: Stack(
-        children: [
-          // 1. Cámara en vivo
-          if (_camaraLista && _cameraController != null)
-            SizedBox.expand(
-              child: CameraPreview(_cameraController!),
-            )
-          else
-            Container(
-              color: const Color(0xFF0F172A),
-              child: const Center(
-                child: CircularProgressIndicator(color: Colors.white),
-              ),
-            ),
-
-          // 2. Superficie táctil para colocar nuevos pines
-          GestureDetector(
-            behavior: HitTestBehavior.translucent,
-            onTapUp: (details) {
-              _mostrarFormularioNuevoPin(details.localPosition, screenSize);
-            },
-            child: Container(
-              width: double.infinity,
-              height: double.infinity,
-              color: Colors.transparent,
-            ),
-          ),
-
-          // 3. Retícula central minimalista
-          IgnorePointer(
-            child: Center(
-              child: Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  border: Border.all(
-                    color: Colors.white.withOpacity(0.55),
-                    width: 1.2,
+                label: Text(
+                  "Técnico",
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: _modoTecnico
+                        ? UaqFixApp.primaryBlue
+                        : UaqFixApp.textMuted,
                   ),
-                  shape: BoxShape.circle,
                 ),
-                child: Center(
-                  child: Container(
-                    width: 5,
-                    height: 5,
-                    decoration: const BoxDecoration(
-                      color: Colors.white,
-                      shape: BoxShape.circle,
+                onSelected: (val) => setState(() => _modoTecnico = val),
+              ),
+            ),
+          ],
+        ),
+        body: LayoutBuilder(
+          builder: (context, constraints) {
+            // Usamos el tamaño exacto del área de cámara (sin restar el AppBar por error)
+            final Size viewSize =
+                Size(constraints.maxWidth, constraints.maxHeight);
+
+            int pinesIzquierda = 0;
+            int pinesDerecha = 0;
+            final List<Map<String, dynamic>> puntosRadar = [];
+            final List<Map<String, dynamic>> pinesParaRenderizar = [];
+
+            for (final pin in _pinesActivos) {
+              final coords =
+                  pin['coordenadas_ar'] ?? {'x': 0.0, 'y': 0.0, 'z': -1.5};
+              final double worldX = (coords['x'] as num).toDouble();
+              final double worldY = (coords['y'] as num).toDouble();
+              final double worldZ = (coords['z'] as num).toDouble();
+
+              final proyeccion = _proyectarPunto3DAPantalla(
+                  worldX, worldY, worldZ, viewSize);
+              final bool enPantalla = proyeccion['enPantalla'] as bool;
+              final double deltaYaw = proyeccion['deltaYaw'] as double;
+              final double distancia = proyeccion['distancia'] as double;
+              final Offset posPantalla = proyeccion['offset'] as Offset;
+              final Color color = _colorPorTipo(pin['tipo']);
+
+              puntosRadar.add({
+                "deltaYaw": deltaYaw,
+                "distancia": distancia,
+                "color": color,
+              });
+
+              if (!enPantalla) {
+                if (deltaYaw < 0) {
+                  pinesIzquierda++;
+                } else {
+                  pinesDerecha++;
+                }
+                continue;
+              }
+
+              pinesParaRenderizar.add({
+                "pin": pin,
+                "pos": posPantalla,
+                "distancia": distancia,
+                "color": color,
+              });
+            }
+
+            // Los pines más cercanos se dibujan encima de los más lejanos
+            pinesParaRenderizar.sort((a, b) =>
+                (b['distancia'] as double).compareTo(a['distancia'] as double));
+
+            final List<Widget> widgetsPinesEnPantalla =
+                pinesParaRenderizar.map((item) {
+              final Map<String, dynamic> pin =
+                  item['pin'] as Map<String, dynamic>;
+              final Offset posPantalla = item['pos'] as Offset;
+              final double distancia = item['distancia'] as double;
+              final Color color = item['color'] as Color;
+
+              final double escala = _calcularEscalaPorDistancia(distancia);
+              final double opacidad =
+                  (1.15 - (distancia / 12.0)).clamp(0.72, 1.0);
+
+              return Positioned(
+                left: posPantalla.dx - 60,
+                top: posPantalla.dy - 50,
+                child: GestureDetector(
+                  onTap: () => _mostrarDetallePin(pin, distancia),
+                  child: Opacity(
+                    opacity: opacidad,
+                    child: Transform.scale(
+                      scale: escala,
+                      alignment: Alignment.center,
+                      child: SizedBox(
+                        width: 120,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 9, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.95),
+                                borderRadius: BorderRadius.circular(12),
+                                boxShadow: const [
+                                  BoxShadow(
+                                    color: Color(0x26000000),
+                                    blurRadius: 8,
+                                    offset: Offset(0, 3),
+                                  ),
+                                ],
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Container(
+                                    width: 7,
+                                    height: 7,
+                                    decoration: BoxDecoration(
+                                      color: color,
+                                      shape: BoxShape.circle,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 5),
+                                  Flexible(
+                                    child: Text(
+                                      "${pin['tipo']?.toString().split(' ').first ?? 'Pin'} · ${distancia.toStringAsFixed(1)}m",
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: UaqFixApp.textDark,
+                                        fontSize: 10.5,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 5),
+                            AnimatedBuilder(
+                              animation: _pinPulseController,
+                              builder: (context, child) {
+                                return Container(
+                                  width: 42,
+                                  height: 42,
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    shape: BoxShape.circle,
+                                    border:
+                                        Border.all(color: color, width: 2.5),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: color.withOpacity(0.25 +
+                                            (_pinPulseController.value * 0.22)),
+                                        blurRadius: 8 +
+                                            (_pinPulseController.value * 6),
+                                        spreadRadius: 1 +
+                                            (_pinPulseController.value * 2),
+                                      ),
+                                    ],
+                                  ),
+                                  child: Icon(
+                                    _iconoPorTipo(pin['tipo']),
+                                    color: color,
+                                    size: 20,
+                                  ),
+                                );
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
                 ),
-              ),
-            ),
-          ),
+              );
+            }).toList();
 
-          // 4. Pines AR proyectados en 3D
-          ...widgetsPinesEnPantalla,
+            // Rumbo horizontal actual en grados (0° = frente al origen)
+            final vm.Vector3 fwd =
+                _rotRenderWC.transform(vm.Vector3(0.0, 0.0, -1.0));
+            final int gradosBrj =
+                ((math.atan2(fwd.x, -fwd.z) * 180 / math.pi) % 360 + 360)
+                        .round() %
+                    360;
 
-          // 5. Indicadores laterales cuando hay pines detrás o a los lados
-          if (pinesIzquierda > 0)
-            Positioned(
-              left: 12,
-              top: screenSize.height * 0.42,
-              child: IgnorePointer(
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.92),
-                    borderRadius: BorderRadius.circular(20),
-                    boxShadow: const [
-                      BoxShadow(color: Color(0x22000000), blurRadius: 8)
-                    ],
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.chevron_left_rounded,
-                          color: UaqFixApp.primaryBlue, size: 20),
-                      Text(
-                        "$pinesIzquierda",
-                        style: const TextStyle(
-                          color: UaqFixApp.primaryBlue,
-                          fontWeight: FontWeight.w800,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-
-          if (pinesDerecha > 0)
-            Positioned(
-              right: 12,
-              top: screenSize.height * 0.42,
-              child: IgnorePointer(
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.92),
-                    borderRadius: BorderRadius.circular(20),
-                    boxShadow: const [
-                      BoxShadow(color: Color(0x22000000), blurRadius: 8)
-                    ],
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        "$pinesDerecha",
-                        style: const TextStyle(
-                          color: UaqFixApp.primaryBlue,
-                          fontWeight: FontWeight.w800,
-                          fontSize: 12,
-                        ),
-                      ),
-                      const Icon(Icons.chevron_right_rounded,
-                          color: UaqFixApp.primaryBlue, size: 20),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-
-          // 6. Indicador de toque temporal
-          if (_puntoTemporalPantalla != null)
-            Positioned(
-              left: _puntoTemporalPantalla!.dx - 22,
-              top: _puntoTemporalPantalla!.dy - 22,
-              child: Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: UaqFixApp.primaryBlue.withOpacity(0.2),
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Colors.white, width: 2),
-                ),
-                child: const Icon(
-                  Icons.add_rounded,
-                  color: Colors.white,
-                  size: 24,
-                ),
-              ),
-            ),
-
-          // 7. HUD Superior: Contador de Pines + Radar Espacial 360°
-          Positioned(
-            top: 14,
-            left: 16,
-            right: 16,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              crossAxisAlignment: CrossAxisAlignment.start,
+            return Stack(
               children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Container(
+                // 1. Cámara en vivo con proporción óptica exacta (BoxFit.cover sin distorsión)
+                if (_camaraLista &&
+                    _cameraController != null &&
+                    _cameraController!.value.previewSize != null)
+                  SizedBox.expand(
+                    child: FittedBox(
+                      fit: BoxFit.cover,
+                      child: SizedBox(
+                        width: _cameraController!.value.previewSize!.height,
+                        height: _cameraController!.value.previewSize!.width,
+                        child: CameraPreview(_cameraController!),
+                      ),
+                    ),
+                  )
+                else
+                  Container(
+                    color: const Color(0xFF0F172A),
+                    child: const Center(
+                      child: CircularProgressIndicator(color: Colors.white),
+                    ),
+                  ),
+
+                // 2. Superficie táctil para colocar nuevos pines
+                GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onTapUp: (details) {
+                    _mostrarFormularioNuevoPin(details.localPosition, viewSize);
+                  },
+                  child: Container(
+                    width: double.infinity,
+                    height: double.infinity,
+                    color: Colors.transparent,
+                  ),
+                ),
+
+                // 3. Retícula central minimalista
+                IgnorePointer(
+                  child: Center(
+                    child: Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        border: Border.all(
+                          color: Colors.white.withOpacity(0.55),
+                          width: 1.2,
+                        ),
+                        shape: BoxShape.circle,
+                      ),
+                      child: Center(
+                        child: Container(
+                          width: 5,
+                          height: 5,
+                          decoration: const BoxDecoration(
+                            color: Colors.white,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+
+                // 4. Pines AR anclados con matriz 3D y perspectiva de distancia
+                ...widgetsPinesEnPantalla,
+
+                // 5. Indicadores laterales cuando hay pines fuera de vista
+                if (pinesIzquierda > 0)
+                  Positioned(
+                    left: 12,
+                    top: viewSize.height * 0.44,
+                    child: IgnorePointer(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.92),
+                          borderRadius: BorderRadius.circular(20),
+                          boxShadow: const [
+                            BoxShadow(color: Color(0x22000000), blurRadius: 8)
+                          ],
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.chevron_left_rounded,
+                                color: UaqFixApp.primaryBlue, size: 20),
+                            Text(
+                              "$pinesIzquierda",
+                              style: const TextStyle(
+                                color: UaqFixApp.primaryBlue,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+
+                if (pinesDerecha > 0)
+                  Positioned(
+                    right: 12,
+                    top: viewSize.height * 0.44,
+                    child: IgnorePointer(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.92),
+                          borderRadius: BorderRadius.circular(20),
+                          boxShadow: const [
+                            BoxShadow(color: Color(0x22000000), blurRadius: 8)
+                          ],
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              "$pinesDerecha",
+                              style: const TextStyle(
+                                color: UaqFixApp.primaryBlue,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 12,
+                              ),
+                            ),
+                            const Icon(Icons.chevron_right_rounded,
+                                color: UaqFixApp.primaryBlue, size: 20),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+
+                // 6. Indicador de toque temporal
+                if (_puntoTemporalPantalla != null)
+                  Positioned(
+                    left: _puntoTemporalPantalla!.dx - 22,
+                    top: _puntoTemporalPantalla!.dy - 22,
+                    child: Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: UaqFixApp.primaryBlue.withOpacity(0.2),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white, width: 2),
+                      ),
+                      child: const Icon(
+                        Icons.add_rounded,
+                        color: Colors.white,
+                        size: 24,
+                      ),
+                    ),
+                  ),
+
+                // 7. HUD Superior: Contador de Pines + Radar Espacial 360°
+                Positioned(
+                  top: 14,
+                  left: 16,
+                  right: 16,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.92),
+                          borderRadius: BorderRadius.circular(24),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Color(0x18000000),
+                              blurRadius: 10,
+                              offset: Offset(0, 3),
+                            ),
+                          ],
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (_cargandoPines)
+                              const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: UaqFixApp.primaryBlue,
+                                ),
+                              )
+                            else
+                              const Icon(
+                                Icons.place_rounded,
+                                color: UaqFixApp.primaryBlue,
+                                size: 17,
+                              ),
+                            const SizedBox(width: 6),
+                            Text(
+                              _cargandoPines
+                                  ? "Sincronizando..."
+                                  : "${_pinesActivos.length} Pines · $gradosBrj°",
+                              style: const TextStyle(
+                                color: UaqFixApp.textDark,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 12.5,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      Container(
+                        width: 64,
+                        height: 64,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.92),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                              color: const Color(0xFFDBEAFE), width: 1.5),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Color(0x18000000),
+                              blurRadius: 10,
+                              offset: Offset(0, 3),
+                            ),
+                          ],
+                        ),
+                        child: CustomPaint(
+                          painter: _Radar360Painter(puntos: puntosRadar),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                // 8. Control lateral de Acercamiento / Caminata en el Salón
+                Positioned(
+                  right: 16,
+                  bottom: 92,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.92),
+                      borderRadius: BorderRadius.circular(24),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x22000000),
+                          blurRadius: 10,
+                          offset: Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          tooltip: "Acercarse (+0.5m)",
+                          icon: const Icon(
+                            Icons.keyboard_arrow_up_rounded,
+                            color: UaqFixApp.primaryBlue,
+                          ),
+                          onPressed: () => _avanzarEnElSalon(0.5),
+                        ),
+                        InkWell(
+                          onTap: () {
+                            setState(() =>
+                                _caminataAutoActiva = !_caminataAutoActiva);
+                            _mostrarNotificacion(
+                              icono: Icons.directions_walk_rounded,
+                              texto: _caminataAutoActiva
+                                  ? "Detector de pasos al caminar activado"
+                                  : "Posición fija activada (máxima estabilidad)",
+                              color: UaqFixApp.primaryBlue,
+                            );
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 4),
+                            child: Icon(
+                              Icons.directions_walk_rounded,
+                              size: 18,
+                              color: _caminataAutoActiva
+                                  ? UaqFixApp.primaryBlue
+                                  : UaqFixApp.textMuted,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: "Alejarse (-0.5m)",
+                          icon: const Icon(
+                            Icons.keyboard_arrow_down_rounded,
+                            color: UaqFixApp.primaryBlue,
+                          ),
+                          onPressed: () => _avanzarEnElSalon(-0.5),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
+                // 9. Guía inferior minimalista
+                Positioned(
+                  bottom: 24,
+                  left: 20,
+                  right: 20,
+                  child: IgnorePointer(
+                    child: Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 8),
+                          horizontal: 16, vertical: 12),
                       decoration: BoxDecoration(
                         color: Colors.white.withOpacity(0.92),
-                        borderRadius: BorderRadius.circular(24),
+                        borderRadius: BorderRadius.circular(20),
                         boxShadow: const [
                           BoxShadow(
-                            color: Color(0x18000000),
-                            blurRadius: 10,
-                            offset: Offset(0, 3),
+                            color: Color(0x1F000000),
+                            blurRadius: 12,
+                            offset: Offset(0, 4),
                           ),
                         ],
                       ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
+                      child: const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          if (_cargandoPines)
-                            const SizedBox(
-                              width: 14,
-                              height: 14,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: UaqFixApp.primaryBlue,
+                          Icon(
+                            Icons.view_in_ar_rounded,
+                            color: UaqFixApp.primaryBlue,
+                            size: 18,
+                          ),
+                          SizedBox(width: 10),
+                          Flexible(
+                            child: Text(
+                              "Toca un punto para anclar un pin fijo 3D o usa las flechas para acercarte",
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: UaqFixApp.textDark,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
                               ),
-                            )
-                          else
-                            const Icon(
-                              Icons.place_rounded,
-                              color: UaqFixApp.primaryBlue,
-                              size: 17,
-                            ),
-                          const SizedBox(width: 6),
-                          Text(
-                            _cargandoPines
-                                ? "Sincronizando..."
-                                : "${_pinesActivos.length} Pines · $gradosBrj°",
-                            style: const TextStyle(
-                              color: UaqFixApp.textDark,
-                              fontWeight: FontWeight.w700,
-                              fontSize: 12.5,
                             ),
                           ),
                         ],
                       ),
                     ),
-                  ],
-                ),
-
-                // Mini-Radar 360° minimalista (muestra los pines delante, a los lados y atrás)
-                Container(
-                  width: 64,
-                  height: 64,
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.92),
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                        color: const Color(0xFFDBEAFE), width: 1.5),
-                    boxShadow: const [
-                      BoxShadow(
-                        color: Color(0x18000000),
-                        blurRadius: 10,
-                        offset: Offset(0, 3),
-                      ),
-                    ],
-                  ),
-                  child: CustomPaint(
-                    painter: _Radar360Painter(puntos: puntosRadar),
                   ),
                 ),
               ],
-            ),
-          ),
-
-          // 8. Guía inferior minimalista
-          Positioned(
-            bottom: 24,
-            left: 20,
-            right: 20,
-            child: IgnorePointer(
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.92),
-                  borderRadius: BorderRadius.circular(20),
-                  boxShadow: const [
-                    BoxShadow(
-                      color: Color(0x1F000000),
-                      blurRadius: 12,
-                      offset: Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: const Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      Icons.threesixty_rounded,
-                      color: UaqFixApp.primaryBlue,
-                      size: 18,
-                    ),
-                    SizedBox(width: 10),
-                    Flexible(
-                      child: Text(
-                        "Toca para anclar un pin 3D o gira 360° guiándote con el radar superior",
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: UaqFixApp.textDark,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ],
+            );
+          },
+        ),
       ),
     );
   }
 }
 
-// Pintor del Radar Espacial 360° en la esquina superior derecha
 class _Radar360Painter extends CustomPainter {
   final List<Map<String, dynamic>> puntos;
 
@@ -1380,39 +1619,35 @@ class _Radar360Painter extends CustomPainter {
     final Offset center = Offset(size.width / 2, size.height / 2);
     final double radius = size.width / 2 - 6;
 
-    // Cono de visión frontal de la cámara (hacia arriba en el radar)
     final Paint fovPaint = Paint()
       ..color = UaqFixApp.primaryBlue.withOpacity(0.15)
       ..style = PaintingStyle.fill;
 
     canvas.drawArc(
       Rect.fromCircle(center: center, radius: radius),
-      -math.pi / 2 - 0.49,
-      0.98,
+      -math.pi / 2 - 0.46,
+      0.92,
       true,
       fovPaint,
     );
 
-    // Anillo interior de referencia
     final Paint ringPaint = Paint()
       ..color = const Color(0xFFE2E8F0)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.0;
     canvas.drawCircle(center, radius * 0.55, ringPaint);
 
-    // Punto central (Usuario)
     final Paint userPaint = Paint()
       ..color = UaqFixApp.primaryBlue
       ..style = PaintingStyle.fill;
     canvas.drawCircle(center, 3.0, userPaint);
 
-    // Dibujar cada pin en su ángulo relativo (0° = arriba/frente, 180° = abajo/atrás)
     for (final p in puntos) {
       final double deltaYaw = p['deltaYaw'] as double;
-      final double dist = (p['distancia'] as double).clamp(0.5, 5.0);
+      final double dist = (p['distancia'] as double).clamp(0.4, 6.0);
       final Color color = p['color'] as Color;
 
-      final double rNorm = (dist / 5.0) * (radius - 3);
+      final double rNorm = (dist / 6.0) * (radius - 3);
       final double angleCanvas = deltaYaw - (math.pi / 2);
 
       final Offset dotPos = Offset(

@@ -81,30 +81,68 @@ class HomeScannerScreen extends StatefulWidget {
 }
 
 class _HomeScannerScreenState extends State<HomeScannerScreen>
-    with SingleTickerProviderStateMixin {
-  final MobileScannerController cameraController = MobileScannerController();
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+  MobileScannerController? _scannerController;
   bool _navegando = false;
+  bool _escanerActivo = true;
   late AnimationController _pulseController;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1800),
     )..repeat(reverse: true);
+    _inicializarEscaner();
   }
 
-  void _abrirEspacioAR(String qrCode, String nombreZona) async {
+  void _inicializarEscaner() {
+    _scannerController?.dispose();
+    _scannerController = MobileScannerController(
+      detectionSpeed: DetectionSpeed.normal,
+      facing: CameraFacing.back,
+    );
+    if (mounted) {
+      setState(() => _escanerActivo = true);
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
     if (_navegando) return;
-    setState(() => _navegando = true);
-    await cameraController.stop();
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused) {
+      _scannerController?.stop();
+    } else if (state == AppLifecycleState.resumed) {
+      _inicializarEscaner();
+    }
+  }
+
+  Future<void> _abrirEspacioAR(String qrCode, String nombreZona) async {
+    if (_navegando) return;
+    setState(() {
+      _navegando = true;
+      _escanerActivo = false;
+    });
+
+    // Liberamos por completo la cámara del escáner antes de abrir la cámara AR
+    try {
+      await _scannerController?.stop();
+      await _scannerController?.dispose();
+      _scannerController = null;
+    } catch (_) {}
+
+    // Pequeña pausa para que Android CameraX libere el recurso físico
+    await Future.delayed(const Duration(milliseconds: 200));
 
     if (!mounted) return;
     await Navigator.push(
       context,
       PageRouteBuilder(
-        transitionDuration: const Duration(milliseconds: 350),
+        transitionDuration: const Duration(milliseconds: 320),
+        reverseTransitionDuration: const Duration(milliseconds: 250),
         pageBuilder: (context, animation, secondaryAnimation) =>
             ArWorkspaceScreen(
           ubicacionQr: qrCode,
@@ -129,16 +167,19 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
       ),
     );
 
-    await cameraController.start();
+    // Al regresar de la pantalla AR, esperamos a que termine la transición y recreamos el escáner
+    await Future.delayed(const Duration(milliseconds: 300));
     if (mounted) {
+      _inicializarEscaner();
       setState(() => _navegando = false);
     }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pulseController.dispose();
-    cameraController.dispose();
+    _scannerController?.dispose();
     super.dispose();
   }
 
@@ -197,7 +238,7 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
       ),
       body: Column(
         children: [
-          // Sección Superior: Visor de Escáner QR con bordes redondeados
+          // Sección Superior: Visor de Escáner QR con reconstrucción limpia
           Expanded(
             flex: 5,
             child: Padding(
@@ -207,23 +248,46 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    MobileScanner(
-                      controller: cameraController,
-                      onDetect: (capture) {
-                        for (final barcode in capture.barcodes) {
-                          final String? code = barcode.rawValue;
-                          if (code != null && code.isNotEmpty) {
-                            _abrirEspacioAR(code, "Nodo QR Escaneado");
-                            break;
+                    if (_escanerActivo && _scannerController != null)
+                      MobileScanner(
+                        controller: _scannerController!,
+                        onDetect: (capture) {
+                          for (final barcode in capture.barcodes) {
+                            final String? code = barcode.rawValue;
+                            if (code != null && code.isNotEmpty) {
+                              _abrirEspacioAR(code, "Nodo QR: $code");
+                              break;
+                            }
                           }
-                        }
-                      },
-                    ),
+                        },
+                      )
+                    else
+                      Container(
+                        color: const Color(0xFF0F172A),
+                        child: const Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              CircularProgressIndicator(
+                                color: Colors.white,
+                                strokeWidth: 2.5,
+                              ),
+                              SizedBox(height: 12),
+                              Text(
+                                "Cambiando lente de cámara...",
+                                style: TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
 
-                    // Oscurecimiento sutil alrededor del marco
                     Container(color: Colors.black.withOpacity(0.18)),
 
-                    // Marco de escaneo animado minimalista
                     Center(
                       child: AnimatedBuilder(
                         animation: _pulseController,
@@ -262,7 +326,6 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
                       ),
                     ),
 
-                    // Etiqueta flotante inferior dentro del visor
                     Positioned(
                       bottom: 16,
                       left: 24,
@@ -304,7 +367,7 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
             ),
           ),
 
-          // Sección Inferior: Selector de Espacios (Tarjetas limpias)
+          // Sección Inferior: Selector de Espacios
           Expanded(
             flex: 4,
             child: Container(
@@ -352,7 +415,8 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
                   const SizedBox(height: 4),
                   const Text(
                     "Selecciona un entorno para visualizar o anclar reportes 3D:",
-                    style: TextStyle(color: UaqFixApp.textMuted, fontSize: 12.5),
+                    style:
+                        TextStyle(color: UaqFixApp.textMuted, fontSize: 12.5),
                   ),
                   const SizedBox(height: 12),
                   Expanded(
@@ -362,7 +426,8 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
                         _tarjetaZona(
                           icon: Icons.desktop_windows_rounded,
                           titulo: "Aula de Cómputo 3 · Piso 2",
-                          subtitulo: "Facultad de Informática · Nodoqr_salon_3_piso_2",
+                          subtitulo:
+                              "Facultad de Informática · Nodo qr_salon_3_piso_2",
                           qrId: "qr_salon_3_piso_2",
                         ),
                         const SizedBox(height: 10),
@@ -376,7 +441,8 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
                         _tarjetaZona(
                           icon: Icons.precision_manufacturing_rounded,
                           titulo: "Celda Robótica 04 · Industria 4.0",
-                          subtitulo: "Laboratorio de Automatización · Nodo qr_celda_industrial_04",
+                          subtitulo:
+                              "Laboratorio de Automatización · Nodo qr_celda_industrial_04",
                           qrId: "qr_celda_industrial_04",
                         ),
                       ],
