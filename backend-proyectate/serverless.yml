@@ -55,7 +55,7 @@ functions:
     handler: handler.obtenerPinesAR
     events:
       - http:
-          path: ubicaciones/{ubicacion_qr}/reportes # <-- CAMBIO CLAVE: Ruta independiente
+          path: ubicaciones/{ubicacion_qr}/reportes
           method: get
           cors: true
 
@@ -65,4 +65,12 @@ functions:
       - http:
           path: reportes/{reporteId}/resolver
           method: put
+          cors: true
+
+  obtenerTodosReportes:
+    handler: handler.obtenerTodosReportes
+    events:
+      - http:
+          path: reportes
+          method: get
           cors: true

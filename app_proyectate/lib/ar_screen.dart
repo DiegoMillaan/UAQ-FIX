@@ -31,31 +31,39 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
   bool _cargandoPines = true;
   bool _modoTecnico = false;
 
-  // Subscripciones de Sensores (Giroscopio + Acelerómetro)
+  // Subscripciones 9-DOF: Giroscopio + Acelerómetro (Gravedad) + Magnetómetro (Brújula 360°)
   StreamSubscription<GyroscopeEvent>? _gyroSub;
   StreamSubscription<AccelerometerEvent>? _accelSub;
+  StreamSubscription<MagnetometerEvent>? _magSub;
 
-  // Matriz de Rotación 3D de Dispositivo a Mundo (R_WC)
-  // Transforma cualquier vector de la cámara al salón: v_world = _rotWC * v_dev
-  vm.Matrix3 _rotWC = vm.Matrix3.identity();
-  vm.Matrix3 _rotRenderWC = vm.Matrix3.identity();
+  // Ejes ortonormales del Salón expresados en coordenadas del teléfono:
+  // _wx = Derecha del salón (+X), _wy = Arriba/Techo (+Y), _wz = Atrás del origen (+Z)
+  vm.Vector3 _wx = vm.Vector3(1.0, 0.0, 0.0);
+  vm.Vector3 _wy = vm.Vector3(0.0, 1.0, 0.0);
+  vm.Vector3 _wz = vm.Vector3(0.0, 0.0, 1.0);
+
   bool _orientacionInicializada = false;
+  bool _brujulaCalibrada = false;
   DateTime? _ultimoEventoGyro;
 
-  // Vector de gravedad medido en coordenadas del teléfono
+  // Vectores físicos medidos por Acelerómetro y Magnetómetro
   vm.Vector3 _gravDev = vm.Vector3(0.0, 9.81, 0.0);
-  double _ultimoVelAngularMag = 0.0;
+  vm.Vector3 _magDev = vm.Vector3.zero();
 
-  // Posición 3D del usuario en el salón (en metros)
-  vm.Vector3 _userPos = vm.Vector3.zero();
+  // Constantes de anclaje magnético del salón para que 0° sea siempre donde se abrió el QR
+  double _magRefCos = 1.0;
+  double _magRefSin = 0.0;
 
-  // Detector de pasos estricto (solo cuando el usuario camina realmente, sin rotar el teléfono)
-  bool _caminataAutoActiva = false;
+  // Escala radial automática al caminar (acerca/aleja visualmente sin desanclar el pin de la pared)
+  double _offsetRadialPasos = 0.0;
+  double _gravMagSuave = 9.81;
   DateTime _ultimoPaso = DateTime.now();
-  double _gravMagFiltrada = 9.81;
 
-  // Apertura horizontal óptica de cámara trasera en modo retrato (~53 grados)
-  static const double _tanHalfFovH = 0.498; // tan(26.5°)
+  // Memoria de posiciones en pantalla por pin para absorber micro-temblores de la mano
+  final Map<String, Offset> _posSuavizadaPorPin = {};
+
+  // Apertura óptica horizontal de la cámara trasera (~53 grados)
+  static const double _tanHalfFovH = 0.498;
 
   Offset? _puntoTemporalPantalla;
   late AnimationController _pinPulseController;
@@ -69,7 +77,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
     )..repeat(reverse: true);
 
     _inicializarCamara();
-    _iniciarMotorMatricial3D();
+    _iniciarMotor9DOF();
     _cargarPinesDesdeAWS();
   }
 
@@ -106,6 +114,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
 
     _gyroSub?.cancel();
     _accelSub?.cancel();
+    _magSub?.cancel();
 
     try {
       final cam = _cameraController;
@@ -118,41 +127,68 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
     }
   }
 
-  // Construye una matriz 3D inicial alineada exactamente con la gravedad real del salón
-  vm.Matrix3 _construirMatrizDesdeGravedad(vm.Vector3 upDev) {
-    final vm.Vector3 yW = upDev.normalized();
-    // Eje frontal de la cámara trasera es (0, 0, -1)
-    vm.Vector3 forwardDev = vm.Vector3(0.0, 0.0, -1.0);
-    if (yW.dot(forwardDev).abs() > 0.95) {
-      forwardDev = vm.Vector3(0.0, 1.0, 0.0);
+  // Inicializa los 3 ejes del salón alineados con la gravedad real
+  void _alinearEjesConGravedadActual() {
+    if (_gravDev.length < 2.0) return;
+    _wy = _gravDev.normalized();
+
+    // La cámara apunta hacia (0, 0, -1). El eje Derecha (+X) es Forward x Up
+    vm.Vector3 forwardCam = vm.Vector3(0.0, 0.0, -1.0);
+    if (_wy.dot(forwardCam).abs() > 0.92) {
+      forwardCam = vm.Vector3(0.0, 1.0, 0.0);
     }
-    // Right = Forward x Up
-    final vm.Vector3 xW = forwardDev.cross(yW).normalized();
-    // Back (+Z_world) = Right x Up
-    final vm.Vector3 zW = xW.cross(yW).normalized();
-
-    // xW, yW, zW son las filas de R_WC
-    return vm.Matrix3(
-      xW.x, yW.x, zW.x,
-      xW.y, yW.y, zW.y,
-      xW.z, yW.z, zW.z,
-    );
+    _wx = forwardCam.cross(_wy).normalized();
+    _wz = _wx.cross(_wy).normalized();
+    _orientacionInicializada = true;
+    _brujulaCalibrada = false;
   }
 
-  // Re-ortonormaliza la matriz 3x3 para evitar cualquier deformación numérica
-  void _ortonormalizarMatriz(vm.Matrix3 m) {
-    vm.Vector3 r0 = m.row0.normalized();
-    vm.Vector3 r1 = m.row1;
-    r1 = (r1 - r0 * r0.dot(r1)).normalized();
-    vm.Vector3 r2 = r0.cross(r1).normalized();
-
-    m.setRow(0, r0);
-    m.setRow(1, r1);
-    m.setRow(2, r2);
+  // Re-ortonormaliza los 3 vectores base del salón para mantener precisión matemática perfecta
+  void _ortonormalizarBase() {
+    _wy.normalize();
+    _wx = (_wx - _wy * _wx.dot(_wy)).normalized();
+    _wz = _wx.cross(_wy).normalized();
   }
 
-  void _iniciarMotorMatricial3D() {
-    // 1. Acelerómetro: Mide el vector "Arriba" (Gravedad) real en 3D
+  // Rota un vector usando la fórmula vectorial exacta de Rodrigues
+  vm.Vector3 _rotarVectorRodrigues(
+      vm.Vector3 v, vm.Vector3 kUnit, double sinPhi, double cosPhi) {
+    final double dot = kUnit.dot(v);
+    return (v * cosPhi) +
+        (kUnit.cross(v) * sinPhi) +
+        (kUnit * (dot * (1.0 - cosPhi)));
+  }
+
+  void _iniciarMotor9DOF() {
+    // 1. Magnetómetro (Brújula 3D): Ancla el norte magnético para no perder la posición al girar 180°/360°
+    _magSub = magnetometerEventStream(
+      samplingPeriod: SensorInterval.gameInterval,
+    ).listen((MagnetometerEvent event) {
+      final vm.Vector3 lectura = vm.Vector3(event.x, event.y, event.z);
+      final double mag = lectura.length;
+      // Rango válido del campo magnético terrestre (evita imanes pegados al teléfono)
+      if (mag < 12.0 || mag > 110.0) return;
+
+      if (_magDev.length == 0.0) {
+        _magDev = lectura;
+      } else {
+        _magDev = _magDev * 0.85 + lectura * 0.15;
+      }
+
+      if (_orientacionInicializada && !_brujulaCalibrada) {
+        final vm.Vector3 eastMag = _magDev.cross(_wy);
+        if (eastMag.length > 2.0) {
+          eastMag.normalize();
+          final vm.Vector3 southMag = eastMag.cross(_wy).normalized();
+          // Guardamos la orientación fija del salón respecto al norte magnético
+          _magRefCos = _wx.dot(eastMag);
+          _magRefSin = _wx.dot(southMag);
+          _brujulaCalibrada = true;
+        }
+      }
+    });
+
+    // 2. Acelerómetro: Bloquea la vertical (Gravedad) y detecta pasos para escala automática
     _accelSub = accelerometerEventStream(
       samplingPeriod: SensorInterval.gameInterval,
     ).listen((AccelerometerEvent event) {
@@ -163,25 +199,28 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
       _gravDev = _gravDev * 0.88 + lectura * 0.12;
 
       if (!_orientacionInicializada && _gravDev.length > 5.0) {
-        _rotWC = _construirMatrizDesdeGravedad(_gravDev);
-        _rotRenderWC = _rotWC.clone();
-        _orientacionInicializada = true;
+        _alinearEjesConGravedadActual();
       }
 
-      // Podómetro opcional: solo cuenta pasos si el modo está activo y el teléfono NO está girando
-      if (_caminataAutoActiva && _ultimoVelAngularMag < 0.22) {
-        _gravMagFiltrada = _gravMagFiltrada * 0.7 + mag * 0.3;
-        final double picoVertical = (_gravMagFiltrada - 9.81);
-        final ahora = DateTime.now();
-        if (picoVertical > 2.4 &&
-            ahora.difference(_ultimoPaso).inMilliseconds > 550) {
-          _ultimoPaso = ahora;
-          _avanzarEnElSalon(0.45);
-        }
+      // Detección suave de pasos al caminar para ajustar el efecto de cercanía/lejanía
+      _gravMagSuave = _gravMagSuave * 0.75 + mag * 0.25;
+      final double impulsoPaso = _gravMagSuave - 9.81;
+      final ahora = DateTime.now();
+
+      if (impulsoPaso > 1.85 &&
+          ahora.difference(_ultimoPaso).inMilliseconds > 520) {
+        _ultimoPaso = ahora;
+        // Aceleración lineal en el eje frontal de la cámara (-Z) para saber si camina adelante o atrás
+        final double accelZLineal = event.z - (9.81 * _wy.z);
+        final double deltaPaso = accelZLineal >= 0 ? -0.35 : 0.35;
+        setState(() {
+          _offsetRadialPasos =
+              (_offsetRadialPasos + deltaPaso).clamp(-3.5, 4.5);
+        });
       }
     });
 
-    // 2. Giroscopio 3D + Filtro Complementario Mahony (Cero inversión de ejes y cero deriva)
+    // 3. Giroscopio 60Hz + Filtro AHRS 9-DOF (Cero deriva y cero inversión de ejes)
     _gyroSub = gyroscopeEventStream(
       samplingPeriod: SensorInterval.gameInterval,
     ).listen((GyroscopeEvent event) {
@@ -197,140 +236,160 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
 
       if (dt <= 0.0 || dt > 0.2 || !_orientacionInicializada) return;
 
-      // Zona muerta suave para eliminar el pulso de la mano cuando sostienes el celular fijo
-      const double deadzone = 0.022;
-      final double gx = event.x.abs() > deadzone
-          ? event.x - event.x.sign * deadzone
-          : 0.0;
-      final double gy = event.y.abs() > deadzone
-          ? event.y - event.y.sign * deadzone
-          : 0.0;
-      final double gz = event.z.abs() > deadzone
-          ? event.z - event.z.sign * deadzone
-          : 0.0;
+      // Solo filtramos el ruido electrónico base (0.003 rad/s) para no perder movimientos lentos
+      final double gx = event.x.abs() > 0.003 ? event.x : 0.0;
+      final double gy = event.y.abs() > 0.003 ? event.y : 0.0;
+      final double gz = event.z.abs() > 0.003 ? event.z : 0.0;
 
       vm.Vector3 omega = vm.Vector3(gx, gy, gz);
-      _ultimoVelAngularMag = omega.length;
 
-      // Corrección continua de Horizonte (Pitch y Roll) con el vector de Gravedad
+      // A. Corrección de Gravedad (Mantiene el horizonte y la altura de los pines clavados)
       final double gravNorm = _gravDev.length;
-      if ((gravNorm - 9.81).abs() < 1.5) {
+      if ((gravNorm - 9.81).abs() < 1.8) {
         final vm.Vector3 uAccel = _gravDev / gravNorm;
-        // La fila 1 de _rotWC es el vector "Arriba" estimado en coordenadas del teléfono
-        final vm.Vector3 uEst = _rotWC.row1;
-        // Producto cruz exacto que alinea el horizonte sin invertir ningún eje
-        final vm.Vector3 errorTilt = uEst.cross(uAccel);
-        omega += errorTilt * 1.85;
+        // Signo exacto: uAccel.cross(_wy) rota _wy directamente hacia uAccel
+        final vm.Vector3 errorGrav = uAccel.cross(_wy);
+        omega += errorGrav * 2.2;
       }
 
-      // Integración 3D exacta por fórmula de Rodrigues: R_new = R_old * exp([omega * dt]x)
-      final double angle = omega.length * dt;
-      if (angle > 0.0001) {
-        final vm.Vector3 axis = omega.normalized();
-        final double s = math.sin(angle);
-        final double c = math.cos(angle);
-        final double oc = 1.0 - c;
-
-        final double x = axis.x, y = axis.y, z = axis.z;
-        final vm.Matrix3 deltaR = vm.Matrix3(
-          c + x * x * oc,     x * y * oc + z * s, x * z * oc - y * s,
-          y * x * oc - z * s, c + y * y * oc,     y * z * oc + x * s,
-          z * x * oc + y * s, z * y * oc - x * s, c + z * z * oc,
-        );
-
-        _rotWC = _rotWC * deltaR;
-        _ortonormalizarMatriz(_rotWC);
+      // B. Corrección de Brújula 360° (Evita que los pines se desfasen al girar o dar la vuelta)
+      if (_brujulaCalibrada && _magDev.length > 10.0) {
+        final vm.Vector3 eastMag = _magDev.cross(_wy);
+        if (eastMag.length > 2.0) {
+          eastMag.normalize();
+          final vm.Vector3 southMag = eastMag.cross(_wy).normalized();
+          // Dirección exacta del eje +X del salón según el campo magnético terrestre
+          final vm.Vector3 wxMag =
+              (eastMag * _magRefCos) + (southMag * _magRefSin);
+          // Proyectamos el error solo alrededor del eje vertical _wy
+          final vm.Vector3 errorMag =
+              _wy * _wy.dot(wxMag.cross(_wx));
+          omega += errorMag * 0.85;
+        }
       }
 
-      // Suavizado exponencial de la matriz renderizada para eliminar cualquier vibración visual
-      double diffSuma = 0.0;
-      for (int i = 0; i < 9; i++) {
-        diffSuma += (_rotWC.storage[i] - _rotRenderWC.storage[i]).abs();
-      }
+      // C. Actualización exacta por rotación de Rodrigues: d(u)/dt = (-omega) x u
+      final vm.Vector3 thetaVec = -omega * dt;
+      final double phi = thetaVec.length;
 
-      if (diffSuma > 0.0015) {
-        setState(() {
-          for (int i = 0; i < 9; i++) {
-            _rotRenderWC.storage[i] = _rotRenderWC.storage[i] * 0.65 +
-                _rotWC.storage[i] * 0.35;
-          }
-          _ortonormalizarMatriz(_rotRenderWC);
-        });
+      if (phi > 0.00001) {
+        final vm.Vector3 kUnit = thetaVec / phi;
+        final double sinPhi = math.sin(phi);
+        final double cosPhi = math.cos(phi);
+
+        _wx = _rotarVectorRodrigues(_wx, kUnit, sinPhi, cosPhi);
+        _wy = _rotarVectorRodrigues(_wy, kUnit, sinPhi, cosPhi);
+        _wz = _rotarVectorRodrigues(_wz, kUnit, sinPhi, cosPhi);
+        _ortonormalizarBase();
+
+        if (mounted) {
+          setState(() {});
+        }
       }
     });
-  }
-
-  // Avanza o retrocede sobre el plano horizontal del salón en la dirección hacia donde miras
-  void _avanzarEnElSalon(double metros) {
-    // El eje frontal de la cámara en el mundo es _rotRenderWC * (0, 0, -1)
-    final vm.Vector3 forwardWorld =
-        _rotRenderWC.transform(vm.Vector3(0.0, 0.0, -1.0));
-    final vm.Vector3 dirHorizontal =
-        vm.Vector3(forwardWorld.x, 0.0, forwardWorld.z);
-    if (dirHorizontal.length > 0.01) {
-      dirHorizontal.normalize();
-      setState(() {
-        _userPos += dirHorizontal * metros;
-        _userPos.x = _userPos.x.clamp(-20.0, 20.0);
-        _userPos.z = _userPos.z.clamp(-20.0, 20.0);
-      });
-    }
   }
 
   void _recalibrarOrigenEspacial() {
     setState(() {
-      if (_gravDev.length > 1.0) {
-        _rotWC = _construirMatrizDesdeGravedad(_gravDev);
-        _rotRenderWC = _rotWC.clone();
-      } else {
-        _rotWC = vm.Matrix3.identity();
-        _rotRenderWC = vm.Matrix3.identity();
-      }
-      _userPos = vm.Vector3.zero();
+      _alinearEjesConGravedadActual();
+      _offsetRadialPasos = 0.0;
+      _posSuavizadaPorPin.clear();
     });
     _mostrarNotificacion(
       icono: Icons.center_focus_strong_rounded,
-      texto: "Origen (0,0,0) recalibrado a tu vista actual",
+      texto: "Espacio AR recalibrado a tu vista actual",
       color: UaqFixApp.primaryBlue,
     );
   }
 
-  // Convierte el toque en pantalla en un Rayo 3D unitario en el Mundo (se congela en el instante del toque)
+  // Transforma un punto del dispositivo al salón (v_world = [ _wx·v, _wy·v, _wz·v ])
+  vm.Vector3 _dispositivoAMundo(vm.Vector3 vDev) {
+    return vm.Vector3(
+      _wx.dot(vDev),
+      _wy.dot(vDev),
+      _wz.dot(vDev),
+    );
+  }
+
+  // Transforma un punto del salón al dispositivo (v_dev = x*_wx + y*_wy + z*_wz)
+  vm.Vector3 _mundoADispositivo(double worldX, double worldY, double worldZ) {
+    return (_wx * worldX) + (_wy * worldY) + (_wz * worldZ);
+  }
+
+  // Calcula el rayo 3D en el salón al tocar un punto en la pantalla
   vm.Vector3 _calcularRayoMundoEnToque(Offset posicionToque, Size screenSize) {
     final double focalPx = (screenSize.width / 2.0) / _tanHalfFovH;
     final double xDev = (posicionToque.dx - screenSize.width / 2.0) / focalPx;
     final double yDev = (screenSize.height / 2.0 - posicionToque.dy) / focalPx;
     final vm.Vector3 rayDev = vm.Vector3(xDev, yDev, -1.0).normalized();
 
-    // Transforma el rayo de la cámara a coordenadas fijas del salón
-    return _rotRenderWC.transform(rayDev).normalized();
+    return _dispositivoAMundo(rayDev).normalized();
   }
 
-  // Proyecta cualquier coordenada 3D {x, y, z} del salón a píxeles exactos en pantalla (Modelo Pinhole)
-  Map<String, dynamic> _proyectarPunto3DAPantalla(
+  // Estima automáticamente la distancia inicial (0.5m a 4.5m) según la inclinación del toque
+  double _estimarDistanciaAutomatica(vm.Vector3 rayoMundo) {
+    // Si apunta hacia abajo (ej. mesa, contacto en pared baja o piso), calcula distancia corta/media
+    if (rayoMundo.y < -0.15) {
+      final double distPiso = (1.3 / (-rayoMundo.y)).clamp(0.5, 4.0);
+      return double.parse(distPiso.toStringAsFixed(1));
+    }
+    // Si apunta al frente o arriba, estima distancia estándar de aula
+    return 1.5;
+  }
+
+  // Proyecta el pin 3D a la pantalla manteniendo su lugar fijo en la pared
+  Map<String, dynamic> _proyectarPinAPantalla(
+    String reporteId,
     double worldX,
     double worldY,
     double worldZ,
     Size screenSize,
   ) {
-    final vm.Vector3 relWorld =
-        vm.Vector3(worldX, worldY, worldZ) - _userPos;
-    final double distancia = relWorld.length.clamp(0.3, 30.0);
+    final double distanciaBase =
+        math.sqrt(worldX * worldX + worldY * worldY + worldZ * worldZ)
+            .clamp(0.35, 25.0);
 
-    // Transformamos del salón a la cámara usando la transpuesta: v_dev = R_WC^T * relWorld
-    final vm.Vector3 posCam = _rotRenderWC.transposed().transform(relWorld);
+    // Distancia efectiva que se adapta al caminar pero NUNCA cruza 0.0m ni voltea el pin
+    final double distanciaEfectiva =
+        (distanciaBase + _offsetRadialPasos).clamp(0.35, 25.0);
 
+    // Transformamos la coordenada fija del salón a la cámara actual
+    final vm.Vector3 posCam = _mundoADispositivo(worldX, worldY, worldZ);
     final double focalPx = (screenSize.width / 2.0) / _tanHalfFovH;
 
-    // La cámara trasera mira hacia -Z. El punto está frente a la cámara si posCam.z < -0.12
-    final bool frenteACamara = posCam.z < -0.12;
+    // Está frente a la lente si posCam.z < -0.08
+    final bool frenteACamara = posCam.z < -0.08;
     double dx = -9999.0;
     double dy = -9999.0;
 
     if (frenteACamara) {
       final double invZ = 1.0 / (-posCam.z);
-      dx = (screenSize.width / 2.0) + (posCam.x * invZ) * focalPx;
-      dy = (screenSize.height / 2.0) - (posCam.y * invZ) * focalPx;
+      final double rawDx =
+          (screenSize.width / 2.0) + (posCam.x * invZ) * focalPx;
+      final double rawDy =
+          (screenSize.height / 2.0) - (posCam.y * invZ) * focalPx;
+
+      // Estabilizador en píxeles: elimina el temblor de la mano sin perder ni un grado de giro
+      final Offset? prev = _posSuavizadaPorPin[reporteId];
+      if (prev == null) {
+        dx = rawDx;
+        dy = rawDy;
+      } else {
+        final double distPx = (Offset(rawDx, rawDy) - prev).distance;
+        if (distPx < 1.8) {
+          // Si la mano tiembla menos de 1.8 píxeles, el pin se queda totalmente quieto
+          dx = prev.dx;
+          dy = prev.dy;
+        } else {
+          // Interpolación fluida proporcional a la velocidad de movimiento
+          final double alpha = (distPx / 28.0).clamp(0.28, 0.85);
+          dx = prev.dx + (rawDx - prev.dx) * alpha;
+          dy = prev.dy + (rawDy - prev.dy) * alpha;
+        }
+      }
+      _posSuavizadaPorPin[reporteId] = Offset(dx, dy);
+    } else {
+      _posSuavizadaPorPin.remove(reporteId);
     }
 
     final bool enPantalla = frenteACamara &&
@@ -339,20 +398,20 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
         dy >= -65.0 &&
         dy <= screenSize.height + 65.0;
 
-    // Ángulo horizontal relativo para el radar 360° y flechas laterales
     final double deltaYaw = math.atan2(posCam.x, -posCam.z);
 
     return {
       "offset": Offset(dx, dy),
       "enPantalla": enPantalla,
       "deltaYaw": deltaYaw,
-      "distancia": distancia,
+      "distancia": distanciaEfectiva,
     };
   }
 
-  // Escala visual con perspectiva real: lejos (5m) = 0.38x, medio (1.8m) = 1.0x, cerca (0.6m) = 1.65x
+  // Efecto de lejanía y cercanía: 0.5m se ve grande (1.60x), 4.5m al fondo se ve pequeño (0.38x)
   double _calcularEscalaPorDistancia(double distanciaMetros) {
-    return (1.75 / distanciaMetros.clamp(0.45, 7.5)).clamp(0.38, 1.65);
+    return (1.35 / math.pow(distanciaMetros.clamp(0.4, 8.0), 0.72))
+        .clamp(0.38, 1.65);
   }
 
   Future<void> _cargarPinesDesdeAWS() async {
@@ -389,7 +448,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
         behavior: SnackBarBehavior.floating,
         backgroundColor: Colors.white,
         elevation: 6,
-        margin: const EdgeInsets.fromLTRB(16, 0, 16, 95),
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 90),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(14),
           side: BorderSide(color: color.withOpacity(0.3), width: 1),
@@ -418,6 +477,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
   void dispose() {
     _gyroSub?.cancel();
     _accelSub?.cancel();
+    _magSub?.cancel();
     _pinPulseController.dispose();
     _cameraController?.dispose();
     super.dispose();
@@ -449,13 +509,12 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
     }
   }
 
-  // Modal minimalista claro: CONGELA el rayo 3D en el instante exacto del toque
+  // Congela el vector 3D en el instante del toque y estima la distancia automáticamente
   void _mostrarFormularioNuevoPin(Offset toque, Size screenSize) {
-    // Congelamos la dirección 3D y posición en el milisegundo en que el usuario tocó la pantalla
-    final vm.Vector3 rayoCongelado = _calcularRayoMundoEnToque(toque, screenSize);
-    final vm.Vector3 origenCongelado = _userPos.clone();
+    final vm.Vector3 rayoCongelado =
+        _calcularRayoMundoEnToque(toque, screenSize);
+    double distanciaMetros = _estimarDistanciaAutomatica(rayoCongelado);
 
-    double distanciaMetros = 2.0;
     String tipoSeleccionado = 'Redes / Cómputo';
     final TextEditingController descController = TextEditingController();
     bool enviando = false;
@@ -472,9 +531,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
       builder: (ctx) {
         return StatefulBuilder(
           builder: (context, setModalState) {
-            // Calculamos la coordenada usando el rayo CONGELADO (no importa si mueve el celular al escribir)
-            final vm.Vector3 posFinal =
-                origenCongelado + (rayoCongelado * distanciaMetros);
+            final vm.Vector3 posFinal = rayoCongelado * distanciaMetros;
             final double x = double.parse(posFinal.x.toStringAsFixed(2));
             final double y = double.parse(posFinal.y.toStringAsFixed(2));
             final double z = double.parse(posFinal.z.toStringAsFixed(2));
@@ -593,7 +650,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
                   ),
                   const SizedBox(height: 16),
 
-                  // Control de Profundidad con indicador de tamaño por lejanía
+                  // Distancia estimada automáticamente (ajustable desde 0.5m hasta 6.0m)
                   Container(
                     padding: const EdgeInsets.symmetric(
                         horizontal: 14, vertical: 10),
@@ -617,7 +674,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
                                 ),
                                 SizedBox(width: 8),
                                 Text(
-                                  "Profundidad en el salón:",
+                                  "Distancia al fallo:",
                                   style: TextStyle(
                                     color: UaqFixApp.textDark,
                                     fontSize: 13,
@@ -627,7 +684,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
                               ],
                             ),
                             Text(
-                              "${distanciaMetros.toStringAsFixed(1)} m (${distanciaMetros <= 1.2 ? 'Cerca' : distanciaMetros >= 3.5 ? 'Fondo' : 'Media'}) · Escala ${(previewScale * 100).round()}%",
+                              "${distanciaMetros.toStringAsFixed(1)} m (${distanciaMetros <= 1.0 ? 'Muy cerca' : distanciaMetros >= 3.5 ? 'Fondo' : 'Media'}) · Tamaño ${(previewScale * 100).round()}%",
                               style: const TextStyle(
                                 color: UaqFixApp.primaryBlue,
                                 fontWeight: FontWeight.w700,
@@ -638,9 +695,9 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
                         ),
                         Slider(
                           value: distanciaMetros,
-                          min: 0.6,
+                          min: 0.5,
                           max: 6.0,
-                          divisions: 18,
+                          divisions: 11,
                           activeColor: UaqFixApp.primaryBlue,
                           inactiveColor: const Color(0xFFDBEAFE),
                           onChanged: (val) {
@@ -661,7 +718,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
                     ),
                     decoration: const InputDecoration(
                       labelText: "Descripción del desperfecto",
-                      hintText: "Ej. Contacto dañado en la esquina del fondo...",
+                      hintText: "Ej. Contacto dañado o equipo sin red...",
                       hintStyle: TextStyle(color: Color(0xFF94A3B8)),
                       prefixIcon: Icon(
                         Icons.description_outlined,
@@ -711,7 +768,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
                                 _mostrarNotificacion(
                                   icono: Icons.check_circle_outline_rounded,
                                   texto:
-                                      "Pin AR fijado exactamente a ${distanciaMetros.toStringAsFixed(1)}m",
+                                      "Pin AR anclado a ${distanciaMetros.toStringAsFixed(1)}m",
                                   color: const Color(0xFF0D9488),
                                 );
                                 _cargarPinesDesdeAWS();
@@ -815,7 +872,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
                             ),
                             const SizedBox(height: 2),
                             Text(
-                              "Distancia actual: ${distanciaActual.toStringAsFixed(1)} metros",
+                              "Distancia al punto: ${distanciaActual.toStringAsFixed(1)} metros",
                               style: const TextStyle(
                                 color: UaqFixApp.primaryBlue,
                                 fontWeight: FontWeight.w600,
@@ -1035,7 +1092,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
           ),
           actions: [
             IconButton(
-              tooltip: "Recalibrar origen (0,0,0)",
+              tooltip: "Recalibrar frente (0°)",
               onPressed: _recalibrarOrigenEspacial,
               icon: const Icon(
                 Icons.filter_center_focus_rounded,
@@ -1088,7 +1145,6 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
         ),
         body: LayoutBuilder(
           builder: (context, constraints) {
-            // Usamos el tamaño exacto del área de cámara (sin restar el AppBar por error)
             final Size viewSize =
                 Size(constraints.maxWidth, constraints.maxHeight);
 
@@ -1098,14 +1154,15 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
             final List<Map<String, dynamic>> pinesParaRenderizar = [];
 
             for (final pin in _pinesActivos) {
+              final String id = (pin['reporteId'] ?? '').toString();
               final coords =
                   pin['coordenadas_ar'] ?? {'x': 0.0, 'y': 0.0, 'z': -1.5};
               final double worldX = (coords['x'] as num).toDouble();
               final double worldY = (coords['y'] as num).toDouble();
               final double worldZ = (coords['z'] as num).toDouble();
 
-              final proyeccion = _proyectarPunto3DAPantalla(
-                  worldX, worldY, worldZ, viewSize);
+              final proyeccion = _proyectarPinAPantalla(
+                  id, worldX, worldY, worldZ, viewSize);
               final bool enPantalla = proyeccion['enPantalla'] as bool;
               final double deltaYaw = proyeccion['deltaYaw'] as double;
               final double distancia = proyeccion['distancia'] as double;
@@ -1135,7 +1192,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
               });
             }
 
-            // Los pines más cercanos se dibujan encima de los más lejanos
+            // Los pines cercanos se dibujan sobre los lejanos
             pinesParaRenderizar.sort((a, b) =>
                 (b['distancia'] as double).compareTo(a['distancia'] as double));
 
@@ -1149,7 +1206,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
 
               final double escala = _calcularEscalaPorDistancia(distancia);
               final double opacidad =
-                  (1.15 - (distancia / 12.0)).clamp(0.72, 1.0);
+                  (1.15 - (distancia / 12.0)).clamp(0.75, 1.0);
 
               return Positioned(
                 left: posPantalla.dx - 60,
@@ -1246,9 +1303,9 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
               );
             }).toList();
 
-            // Rumbo horizontal actual en grados (0° = frente al origen)
+            // Rumbo horizontal 0°-360° respecto al frente del salón
             final vm.Vector3 fwd =
-                _rotRenderWC.transform(vm.Vector3(0.0, 0.0, -1.0));
+                _dispositivoAMundo(vm.Vector3(0.0, 0.0, -1.0));
             final int gradosBrj =
                 ((math.atan2(fwd.x, -fwd.z) * 180 / math.pi) % 360 + 360)
                         .round() %
@@ -1256,7 +1313,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
 
             return Stack(
               children: [
-                // 1. Cámara en vivo con proporción óptica exacta (BoxFit.cover sin distorsión)
+                // 1. Cámara en vivo con proporción exacta
                 if (_camaraLista &&
                     _cameraController != null &&
                     _cameraController!.value.previewSize != null)
@@ -1318,7 +1375,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
                   ),
                 ),
 
-                // 4. Pines AR anclados con matriz 3D y perspectiva de distancia
+                // 4. Pines AR anclados por Fusión 9-DOF
                 ...widgetsPinesEnPantalla,
 
                 // 5. Indicadores laterales cuando hay pines fuera de vista
@@ -1491,71 +1548,7 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
                   ),
                 ),
 
-                // 8. Control lateral de Acercamiento / Caminata en el Salón
-                Positioned(
-                  right: 16,
-                  bottom: 92,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.92),
-                      borderRadius: BorderRadius.circular(24),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Color(0x22000000),
-                          blurRadius: 10,
-                          offset: Offset(0, 3),
-                        ),
-                      ],
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          tooltip: "Acercarse (+0.5m)",
-                          icon: const Icon(
-                            Icons.keyboard_arrow_up_rounded,
-                            color: UaqFixApp.primaryBlue,
-                          ),
-                          onPressed: () => _avanzarEnElSalon(0.5),
-                        ),
-                        InkWell(
-                          onTap: () {
-                            setState(() =>
-                                _caminataAutoActiva = !_caminataAutoActiva);
-                            _mostrarNotificacion(
-                              icono: Icons.directions_walk_rounded,
-                              texto: _caminataAutoActiva
-                                  ? "Detector de pasos al caminar activado"
-                                  : "Posición fija activada (máxima estabilidad)",
-                              color: UaqFixApp.primaryBlue,
-                            );
-                          },
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 4),
-                            child: Icon(
-                              Icons.directions_walk_rounded,
-                              size: 18,
-                              color: _caminataAutoActiva
-                                  ? UaqFixApp.primaryBlue
-                                  : UaqFixApp.textMuted,
-                            ),
-                          ),
-                        ),
-                        IconButton(
-                          tooltip: "Alejarse (-0.5m)",
-                          icon: const Icon(
-                            Icons.keyboard_arrow_down_rounded,
-                            color: UaqFixApp.primaryBlue,
-                          ),
-                          onPressed: () => _avanzarEnElSalon(-0.5),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-
-                // 9. Guía inferior minimalista
+                // 8. Guía inferior minimalista
                 Positioned(
                   bottom: 24,
                   left: 20,
@@ -1579,14 +1572,14 @@ class _ArWorkspaceScreenState extends State<ArWorkspaceScreen>
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Icon(
-                            Icons.view_in_ar_rounded,
+                            Icons.compass_calibration_rounded,
                             color: UaqFixApp.primaryBlue,
                             size: 18,
                           ),
                           SizedBox(width: 10),
                           Flexible(
                             child: Text(
-                              "Toca un punto para anclar un pin fijo 3D o usa las flechas para acercarte",
+                              "Toca un objeto para anclar un pin con brújula 360° y escala automática",
                               textAlign: TextAlign.center,
                               style: TextStyle(
                                 color: UaqFixApp.textDark,
