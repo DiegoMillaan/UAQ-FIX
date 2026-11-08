@@ -11,7 +11,6 @@ const crypto = require("crypto");
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
 
-// Cabeceras CORS necesarias para que Flutter Web (Chrome) pueda conectarse sin bloqueos
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Credentials": true,
@@ -19,7 +18,7 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "OPTIONS,POST,GET,PUT",
 };
 
-// 1. POST: Crear un reporte con coordenadas 3D
+// 1. POST: Crear un reporte con coordenadas 3D y datos del alumno que reporta
 module.exports.crearReporte = async (event) => {
   let data;
   try {
@@ -43,6 +42,8 @@ module.exports.crearReporte = async (event) => {
       coordenadas_ar: data.coordenadas_ar,
       estado: "Pendiente",
       fecha: new Date().toISOString(),
+      creado_por_nombre: data.creado_por_nombre || "Estudiante UAQ",
+      creado_por_correo: data.creado_por_correo || "alumno@alumnos.uaq.mx",
     },
   };
 
@@ -62,7 +63,7 @@ module.exports.crearReporte = async (event) => {
   }
 };
 
-// 2. GET: Obtener todos los pines pendientes de un salón específico (Usado por la App Móvil AR)
+// 2. GET: Obtener todos los pines pendientes de un salón o stand específico
 module.exports.obtenerPinesAR = async (event) => {
   const ubicacion_qr = event.pathParameters.ubicacion_qr;
 
@@ -93,7 +94,7 @@ module.exports.obtenerPinesAR = async (event) => {
   }
 };
 
-// 3. PUT: Marcar como resuelto (Protegido con llave maestra)
+// 3. PUT: Marcar como resuelto guardando evidencia, acción y datos del técnico
 module.exports.resolverReporte = async (event) => {
   const headers = event.headers || {};
   const token = headers["x-admin-token"] || headers["X-Admin-Token"];
@@ -110,13 +111,27 @@ module.exports.resolverReporte = async (event) => {
   }
 
   const reporteId = event.pathParameters.reporteId;
+  let bodyData = {};
+  try {
+    if (event.body) {
+      bodyData = JSON.parse(event.body);
+    }
+  } catch (_) {}
 
   const params = {
     TableName: "ReportesTabla",
     Key: { reporteId: reporteId },
-    UpdateExpression: "set estado = :nuevoEstado",
+    UpdateExpression:
+      "set estado = :nuevoEstado, resuelto_por_nombre = :tecNombre, resuelto_por_correo = :tecCorreo, accion_realizada = :accion, evidencia_resolucion = :evidencia, fecha_resolucion = :fechaRes",
     ExpressionAttributeValues: {
       ":nuevoEstado": "Resuelto",
+      ":tecNombre": bodyData.resuelto_por_nombre || "Personal de Mantenimiento",
+      ":tecCorreo": bodyData.resuelto_por_correo || "soporte@mantenimiento.uaq.mx",
+      ":accion": bodyData.accion_realizada || "Mantenimiento correctivo completado",
+      ":evidencia":
+        bodyData.evidencia_resolucion ||
+        "Se realizó la inspección física y reparación del elemento reportado.",
+      ":fechaRes": new Date().toISOString(),
     },
     ReturnValues: "ALL_NEW",
   };
@@ -140,7 +155,7 @@ module.exports.resolverReporte = async (event) => {
   }
 };
 
-// 4. NUEVO GET: Obtener TODOS los reportes globales para el Dashboard Web Administrativo
+// 4. GET: Obtener TODOS los reportes globales (Dashboard Web y Centro de Notificaciones)
 module.exports.obtenerTodosReportes = async () => {
   const params = {
     TableName: "ReportesTabla",
@@ -149,7 +164,6 @@ module.exports.obtenerTodosReportes = async () => {
   try {
     const result = await docClient.send(new ScanCommand(params));
     const items = result.Items || [];
-    // Ordenar del más reciente al más antiguo
     items.sort((a, b) => (b.fecha || "").localeCompare(a.fecha || ""));
 
     return {

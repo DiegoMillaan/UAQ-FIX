@@ -10,7 +10,6 @@ void main() {
 class UaqFixDashboardApp extends StatelessWidget {
   const UaqFixDashboardApp({super.key});
 
-  // Paleta institucional minimalista UAQ Fix (Blancos, Pizarra y Azules)
   static const Color primaryBlue = Color(0xFF1D4ED8);
   static const Color secondaryBlue = Color(0xFF2563EB);
   static const Color softBlueBg = Color(0xFFEFF6FF);
@@ -51,27 +50,25 @@ class AdminDashboardScreen extends StatefulWidget {
 }
 
 class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
-  List<Map<String, dynamic>> _todosReportes = [];
+  List<ReporteMap> _todosReportes = [];
   bool _cargando = true;
   bool _autoRefresh = true;
   Timer? _timer;
   DateTime _ultimaActualizacion = DateTime.now();
 
-  // Filtros interactivos
-  int _menuIndex = 0; // 0: Centro de Control, 1: Mapa Espacial 3D, 2: Bitácora
-  String _filtroEstado = 'Todos'; // 'Todos', 'Pendiente', 'Resuelto'
+  int _menuIndex = 0;
+  String _filtroEstado = 'Todos';
   String _filtroZona = 'Todas';
-  String _filtroCategoria = 'Todas';
+  final String _filtroCategoria = 'Todas';
   String _busqueda = '';
 
-  // Reporte seleccionado en el Plano Espacial
-  Map<String, dynamic>? _reporteSeleccionadoPlano;
+  ReporteMap? _reporteSeleccionadoPlano;
 
   @override
   void initState() {
     super.initState();
     _sincronizarDatos();
-    _timer = Timer.periodic(const Duration(seconds: 10), (_) {
+    _timer = Timer.periodic(const Duration(seconds: 8), (_) {
       if (_autoRefresh) {
         _sincronizarDatos(silencioso: true);
       }
@@ -97,10 +94,14 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           _ultimaActualizacion = DateTime.now();
           if (_reporteSeleccionadoPlano != null) {
             final idSel = _reporteSeleccionadoPlano!['reporteId'];
-            _reporteSeleccionadoPlano = _todosReportes
-                .cast<Map<String, dynamic>?>()
-                .firstWhere((r) => r?['reporteId'] == idSel,
-                    orElse: () => null);
+            ReporteMap? encontrado;
+            for (final item in _todosReportes) {
+              if (item['reporteId'] == idSel) {
+                encontrado = item;
+                break;
+              }
+            }
+            _reporteSeleccionadoPlano = encontrado;
           }
         });
       }
@@ -113,6 +114,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
 
   String _nombreAmigableZona(String? qr) {
     switch (qr) {
+      case 'qr_stand_proyectate_1':
+        return 'Stand Proyéctate 1 · Feria FIF';
       case 'qr_salon_3_piso_2':
         return 'Aula de Cómputo 3 · Piso 2';
       case 'qr_rack_redes_fif':
@@ -164,12 +167,13 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     }
   }
 
-  List<Map<String, dynamic>> get _reportesFiltrados {
+  List<ReporteMap> get _reportesFiltrados {
     return _todosReportes.where((r) {
       final estado = (r['estado'] ?? 'Pendiente').toString();
       final zona = (r['ubicacion_qr'] ?? '').toString();
       final tipo = (r['tipo'] ?? '').toString();
       final desc = (r['descripcion'] ?? '').toString().toLowerCase();
+      final autor = (r['creado_por_correo'] ?? '').toString().toLowerCase();
 
       if (_filtroEstado != 'Todos' && estado != _filtroEstado) return false;
       if (_filtroZona != 'Todas' && zona != _filtroZona) return false;
@@ -177,6 +181,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       if (_busqueda.isNotEmpty &&
           !desc.contains(_busqueda.toLowerCase()) &&
           !zona.toLowerCase().contains(_busqueda.toLowerCase()) &&
+          !autor.contains(_busqueda.toLowerCase()) &&
           !tipo.toLowerCase().contains(_busqueda.toLowerCase())) {
         return false;
       }
@@ -184,49 +189,352 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     }).toList();
   }
 
-  Future<void> _marcarComoResuelto(Map<String, dynamic> reporte) async {
+  void _abrirDialogoResolverConEvidencia(ReporteMap reporte) {
     final id = reporte['reporteId']?.toString();
     if (id == null) return;
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Validando token de administrador y cerrando reporte...'),
-        duration: Duration(seconds: 1),
-      ),
-    );
+    final tecNombreCtrl =
+        TextEditingController(text: "Ing. Carlos Méndez (Mantenimiento)");
+    final tecCorreoCtrl =
+        TextEditingController(text: "carlos.mendez@mantenimiento.uaq.mx");
+    String accion = "Reemplazo o reparación de componente";
+    final evidenciaCtrl = TextEditingController();
+    bool enviando = false;
 
-    final ok = await DashboardApiService.resolverReporte(id);
-    if (!mounted) return;
-
-    if (ok) {
-      ScaffoldMessenger.of(context).clearSnackBars();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: const Color(0xFF0D9488),
-          behavior: SnackBarBehavior.floating,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          content: const Row(
-            children: [
-              Icon(Icons.check_circle_outline_rounded, color: Colors.white),
-              SizedBox(width: 10),
-              Text(
-                'Incidencia marcada como Resuelta en AWS DynamoDB',
-                style: TextStyle(fontWeight: FontWeight.w600),
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              backgroundColor: Colors.white,
+              surfaceTintColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(22)),
+              title: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF0FDFA),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.fact_check_rounded,
+                        color: Color(0xFF0D9488)),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Text(
+                      'Finalizar Reporte y Enviar Evidencia al Alumno',
+                      style:
+                          TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                ],
               ),
-            ],
-          ),
-        ),
-      );
-      _sincronizarDatos();
-    }
+              content: SizedBox(
+                width: 480,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: UaqFixDashboardApp.bgSlate,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Alumno solicitante: ${reporte['creado_por_nombre'] ?? 'Estudiante UAQ'} (${reporte['creado_por_correo'] ?? 'alumnos.uaq.mx'})',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: UaqFixDashboardApp.primaryBlue,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Incidencia: "${reporte['descripcion'] ?? ''}"',
+                            style: const TextStyle(
+                                fontSize: 13, fontWeight: FontWeight.w600),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: tecNombreCtrl,
+                            decoration: const InputDecoration(
+                              labelText: 'Responsable Técnico',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextField(
+                            controller: tecCorreoCtrl,
+                            decoration: const InputDecoration(
+                              labelText: 'Correo @mantenimiento.uaq.mx',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    DropdownButtonFormField<String>(
+                      initialValue: accion,
+                      decoration: const InputDecoration(
+                        labelText: 'Acción correctiva ejecutada',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'Reemplazo o reparación de componente',
+                          child: Text('Reemplazo o reparación de componente'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'Restablecimiento de nodo / red',
+                          child: Text('Restablecimiento de nodo / red'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'Retiro y cambio de mobiliario dañado',
+                          child: Text('Retiro y cambio de mobiliario dañado'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'Aislamiento y corrección eléctrica',
+                          child: Text('Aislamiento y corrección eléctrica'),
+                        ),
+                      ],
+                      onChanged: (v) => setDialogState(() => accion = v!),
+                    ),
+                    const SizedBox(height: 14),
+                    TextField(
+                      controller: evidenciaCtrl,
+                      maxLines: 3,
+                      decoration: const InputDecoration(
+                        labelText:
+                            'Retroalimentación / Evidencia para el alumno (Obligatorio)',
+                        hintText:
+                            'Describe qué se reparó para que el estudiante reciba la confirmación en su Centro de Notificaciones...',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancelar'),
+                ),
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF0D9488),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 18, vertical: 12),
+                  ),
+                  onPressed: enviando
+                      ? null
+                      : () async {
+                          if (evidenciaCtrl.text.trim().isEmpty) return;
+                          setDialogState(() => enviando = true);
+                          final ok = await DashboardApiService.resolverReporte(
+                            reporteId: id,
+                            resueltoPorNombre: tecNombreCtrl.text.trim(),
+                            resueltoPorCorreo: tecCorreoCtrl.text.trim(),
+                            accionRealizada: accion,
+                            evidenciaResolucion: evidenciaCtrl.text.trim(),
+                          );
+                          if (!ctx.mounted) return;
+                          Navigator.pop(ctx);
+                          if (ok && mounted) {
+                            ScaffoldMessenger.of(this.context).showSnackBar(
+                              SnackBar(
+                                backgroundColor: const Color(0xFF0D9488),
+                                behavior: SnackBarBehavior.floating,
+                                content: Text(
+                                    'Reporte resuelto. Notificación enviada a ${reporte['creado_por_correo'] ?? 'alumno'}.'),
+                              ),
+                            );
+                            _sincronizarDatos();
+                          }
+                        },
+                  icon: const Icon(Icons.send_and_archive_rounded, size: 18),
+                  label: Text(enviando
+                      ? 'Sincronizando...'
+                      : 'Confirmar y Notificar al Alumno'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  void _abrirGeneradorQrStand() {
+    String qrSeleccionado = 'qr_stand_proyectate_1';
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            final urlQrImg =
+                'https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=12&data=$qrSeleccionado';
+
+            return AlertDialog(
+              backgroundColor: Colors.white,
+              surfaceTintColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(24)),
+              title: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: UaqFixDashboardApp.softBlueBg,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.qr_code_2_rounded,
+                        color: UaqFixDashboardApp.primaryBlue),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Text(
+                      'Código QR Oficial de Calibración Espacial',
+                      style:
+                          TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                ],
+              ),
+              content: SizedBox(
+                width: 400,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    DropdownButtonFormField<String>(
+                      initialValue: qrSeleccionado,
+                      decoration: const InputDecoration(
+                        labelText:
+                            'Selecciona el espacio a proyectar / imprimir',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                            value: 'qr_stand_proyectate_1',
+                            child: Text('Stand Proyéctate 1 · Feria FIF')),
+                        DropdownMenuItem(
+                            value: 'qr_salon_3_piso_2',
+                            child: Text('Aula de Cómputo 3 · Piso 2')),
+                        DropdownMenuItem(
+                            value: 'qr_rack_redes_fif',
+                            child: Text('Site de Redes y Telecomunicaciones')),
+                        DropdownMenuItem(
+                            value: 'qr_celda_industrial_04',
+                            child: Text('Celda Robótica 04 · Industria 4.0')),
+                      ],
+                      onChanged: (v) =>
+                          setModalState(() => qrSeleccionado = v!),
+                    ),
+                    const SizedBox(height: 20),
+                    Container(
+                      padding: const EdgeInsets.all(18),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                            color: UaqFixDashboardApp.borderBlue, width: 2),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x141D4ED8),
+                            blurRadius: 20,
+                            offset: Offset(0, 8),
+                          ),
+                        ],
+                      ),
+                      child: Column(
+                        children: [
+                          Image.network(
+                            urlQrImg,
+                            width: 240,
+                            height: 240,
+                            errorBuilder: (_, _, _) => const SizedBox(
+                              width: 240,
+                              height: 240,
+                              child: Center(
+                                child: Icon(Icons.qr_code_2_rounded,
+                                    size: 160,
+                                    color: UaqFixDashboardApp.primaryBlue),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          Text(
+                            _nombreAmigableZona(qrSeleccionado),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w800,
+                              fontSize: 15,
+                              color: UaqFixDashboardApp.textDark,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            'ID Nodo: $qrSeleccionado',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 12,
+                              color: UaqFixDashboardApp.primaryBlue,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    const Text(
+                      'Escanea este código directamente con la cámara de UAQ Fix en tu celular para anclar reportes en el Stand de Proyéctate.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: UaqFixDashboardApp.textMuted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: UaqFixDashboardApp.primaryBlue,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cerrar'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
   }
 
   void _abrirModalNuevoReporteWeb() {
-    String zona = 'qr_salon_3_piso_2';
+    String zona = 'qr_stand_proyectate_1';
     String tipo = 'Redes / Cómputo';
     final descCtrl = TextEditingController();
-    double x = 0.8, y = 0.3, z = -1.8;
+    double x = 0.6, y = 0.2, z = -1.5;
     bool guardando = false;
 
     showDialog(
@@ -263,12 +571,15 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     DropdownButtonFormField<String>(
-                      value: zona,
+                      initialValue: zona,
                       decoration: const InputDecoration(
                         labelText: 'Nodo / Ubicación QR',
                         border: OutlineInputBorder(),
                       ),
                       items: const [
+                        DropdownMenuItem(
+                            value: 'qr_stand_proyectate_1',
+                            child: Text('Stand Proyéctate 1 · Feria FIF')),
                         DropdownMenuItem(
                             value: 'qr_salon_3_piso_2',
                             child: Text('Aula de Cómputo 3 · Piso 2')),
@@ -283,7 +594,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                     ),
                     const SizedBox(height: 14),
                     DropdownButtonFormField<String>(
-                      value: tipo,
+                      initialValue: tipo,
                       decoration: const InputDecoration(
                         labelText: 'Categoría',
                         border: OutlineInputBorder(),
@@ -310,7 +621,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                       maxLines: 2,
                       decoration: const InputDecoration(
                         labelText: 'Descripción de la orden o anomalía',
-                        hintText: 'Ej. Revisión preventiva de switch en rack...',
+                        hintText: 'Ej. Revisión de nodo en Stand Proyéctate...',
                         border: OutlineInputBorder(),
                       ),
                     ),
@@ -370,7 +681,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                             y: y,
                             z: z,
                           );
-                          if (!mounted) return;
+                          if (!ctx.mounted) return;
                           Navigator.pop(ctx);
                           if (ok) _sincronizarDatos();
                         },
@@ -404,10 +715,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     return Scaffold(
       body: Row(
         children: [
-          // 1. Barra Lateral de Navegación (Sidebar Institucional Minimalista)
           _buildSidebar(pendientes),
-
-          // 2. Área de Contenido Principal
           Expanded(
             child: Column(
               children: [
@@ -418,7 +726,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        // Fila de Tarjetas Ejecutivas KPI
                         _buildKpiRow(
                           total: total,
                           pendientes: pendientes,
@@ -427,8 +734,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                           tasaResolucion: tasaResolucion,
                         ),
                         const SizedBox(height: 24),
-
-                        // Vista condicional según pestaña seleccionada
                         if (_menuIndex == 0) ...[
                           _buildSeccionMapaYAnalitica(),
                           const SizedBox(height: 24),
@@ -452,7 +757,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
 
   Widget _buildSidebar(int pendientesCount) {
     return Container(
-      width: 265,
+      width: 268,
       decoration: const BoxDecoration(
         color: UaqFixDashboardApp.cardWhite,
         border: Border(
@@ -462,7 +767,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Logo UAQ Fix
           Padding(
             padding: const EdgeInsets.fromLTRB(24, 26, 24, 22),
             child: Row(
@@ -475,7 +779,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                     borderRadius: BorderRadius.circular(12),
                     boxShadow: [
                       BoxShadow(
-                        color: UaqFixDashboardApp.primaryBlue.withOpacity(0.25),
+                        color: UaqFixDashboardApp.primaryBlue
+                            .withValues(alpha: 0.25),
                         blurRadius: 12,
                         offset: const Offset(0, 4),
                       ),
@@ -515,7 +820,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           ),
           const Divider(height: 1, color: UaqFixDashboardApp.borderSlate),
           const SizedBox(height: 18),
-
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 20, vertical: 6),
             child: Text(
@@ -528,7 +832,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
               ),
             ),
           ),
-
           _itemMenuSidebar(
             index: 0,
             icon: Icons.dashboard_outlined,
@@ -542,10 +845,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           _itemMenuSidebar(
             index: 2,
             icon: Icons.assignment_outlined,
-            titulo: 'Bitácora de Reportes',
+            titulo: 'Bitácora y Evidencias',
             badge: pendientesCount > 0 ? pendientesCount.toString() : null,
           ),
-
           const SizedBox(height: 24),
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 20, vertical: 6),
@@ -560,16 +862,15 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
             ),
           ),
           _itemZonaSidebar('Todas', 'Todos los Espacios', Icons.apps_rounded),
-          _itemZonaSidebar(
-              'qr_salon_3_piso_2', 'Aula Cómputo 3 (FIF)', Icons.computer_rounded),
+          _itemZonaSidebar('qr_stand_proyectate_1',
+              'Stand Proyéctate 1 (Feria)', Icons.stars_rounded),
+          _itemZonaSidebar('qr_salon_3_piso_2', 'Aula Cómputo 3 (FIF)',
+              Icons.computer_rounded),
           _itemZonaSidebar(
               'qr_rack_redes_fif', 'Site de Redes / Rack', Icons.dns_rounded),
           _itemZonaSidebar('qr_celda_industrial_04', 'Celda Robótica 04',
               Icons.precision_manufacturing_rounded),
-
           const Spacer(),
-
-          // Tarjeta de Estado Cloud AWS en la parte inferior
           Container(
             margin: const EdgeInsets.all(16),
             padding: const EdgeInsets.all(14),
@@ -626,7 +927,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                       height: 22,
                       child: Switch(
                         value: _autoRefresh,
-                        activeColor: UaqFixDashboardApp.primaryBlue,
+                        activeThumbColor: UaqFixDashboardApp.primaryBlue,
                         onChanged: (v) => setState(() => _autoRefresh = v),
                       ),
                     ),
@@ -772,7 +1073,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                 ),
               ),
               Text(
-                'Facultad de Informática UAQ · Monitoreo de Nodos QR e Industria 4.0 · Última lectura: $horaSync',
+                'Facultad de Informática UAQ · Proyéctate 8va Edición · Última lectura: $horaSync',
                 style: const TextStyle(
                   fontSize: 12,
                   color: UaqFixDashboardApp.textMuted,
@@ -782,6 +1083,24 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           ),
           Row(
             children: [
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: UaqFixDashboardApp.primaryBlue,
+                  side: const BorderSide(color: UaqFixDashboardApp.borderBlue),
+                  backgroundColor: UaqFixDashboardApp.softBlueBg,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                ),
+                onPressed: _abrirGeneradorQrStand,
+                icon: const Icon(Icons.qr_code_2_rounded, size: 18),
+                label: const Text(
+                  'QR Stand Proyéctate',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+                ),
+              ),
+              const SizedBox(width: 10),
               OutlinedButton.icon(
                 style: OutlinedButton.styleFrom(
                   foregroundColor: UaqFixDashboardApp.textDark,
@@ -804,7 +1123,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                   style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
                 ),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 10),
               ElevatedButton.icon(
                 style: ElevatedButton.styleFrom(
                   backgroundColor: UaqFixDashboardApp.primaryBlue,
@@ -860,9 +1179,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         const SizedBox(width: 18),
         Expanded(
           child: _tarjetaKpi(
-            titulo: 'Incidencias Resueltas',
+            titulo: 'Atendidos con Evidencia',
             valor: '$resueltos ($tasaResolucion%)',
-            subtitulo: 'Tasa de eficiencia de mantenimiento',
+            subtitulo: 'Notificados al alumno solicitante',
             icono: Icons.task_alt_rounded,
             color: const Color(0xFF0D9488),
           ),
@@ -872,7 +1191,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           child: _tarjetaKpi(
             titulo: 'Riesgo Crítico (I4.0)',
             valor: criticos.toString(),
-            subtitulo: 'Prioridad inmediata en planta/laboratorio',
+            subtitulo: 'Prioridad inmediata en laboratorio',
             icono: Icons.warning_amber_rounded,
             color: const Color(0xFFDC2626),
           ),
@@ -908,7 +1227,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
             width: 48,
             height: 48,
             decoration: BoxDecoration(
-              color: color.withOpacity(0.1),
+              color: color.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(14),
             ),
             child: Icon(icono, color: color, size: 24),
@@ -953,7 +1272,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     );
   }
 
-  // Sección de Gemelo Espacial 2D/3D (Plano del Salón con Coordenadas AR) + Gráficas
   Widget _buildSeccionMapaYAnalitica({bool expandido = false}) {
     final reportesMapa = _todosReportes.where((r) {
       if (_filtroZona != 'Todas' && r['ubicacion_qr'] != _filtroZona) {
@@ -969,7 +1287,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Mapa / Plano Espacial Interactivo de Coordenadas AR {x, y, z}
         Expanded(
           flex: 7,
           child: Container(
@@ -1012,7 +1329,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                               ),
                             ),
                             Text(
-                              'Vista superior respecto al código QR de origen (0,0,0) · ${_filtroZona == 'Todas' ? 'Todos los nodos' : _nombreAmigableZona(_filtroZona)}',
+                              'Vista superior respecto al QR (0,0,0) · ${_filtroZona == 'Todas' ? 'Todos los nodos' : _nombreAmigableZona(_filtroZona)}',
                               style: const TextStyle(
                                 fontSize: 12,
                                 color: UaqFixDashboardApp.textMuted,
@@ -1022,7 +1339,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                         ),
                       ],
                     ),
-                    // Selector de nodo en el mapa
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 12),
                       decoration: BoxDecoration(
@@ -1043,6 +1359,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                             DropdownMenuItem(
                                 value: 'Todas', child: Text('Todas las Zonas')),
                             DropdownMenuItem(
+                                value: 'qr_stand_proyectate_1',
+                                child: Text('Stand Proyéctate 1')),
+                            DropdownMenuItem(
                                 value: 'qr_salon_3_piso_2',
                                 child: Text('Aula Cómputo 3')),
                             DropdownMenuItem(
@@ -1061,10 +1380,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                   ],
                 ),
                 const SizedBox(height: 16),
-
-                // Lienzo interactivo del Plano Arquitectónico / Espacial
                 SizedBox(
-                  height: expandido ? 420 : 285,
+                  height: expandido ? 420 : 295,
                   width: double.infinity,
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(16),
@@ -1076,13 +1393,10 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
 
                         return Stack(
                           children: [
-                            // Fondo de plano técnico
                             CustomPaint(
                               size: Size(w, h),
                               painter: _PlanoArquitectonicoPainter(),
                             ),
-
-                            // Origen (0,0,0) = Código QR
                             Positioned(
                               left: center.dx - 48,
                               top: center.dy - 14,
@@ -1111,8 +1425,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                                 ),
                               ),
                             ),
-
-                            // Dibujar cada Pin AR en su posición (X, Z) real
                             ...reportesMapa.map((rep) {
                               final coords = rep['coordenadas_ar'] ??
                                   {'x': 0.0, 'y': 0.0, 'z': -1.5};
@@ -1123,16 +1435,17 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                               final double z =
                                   (coords['z'] as num?)?.toDouble() ?? -1.5;
 
-                              // Escala del plano: rango de -5m a +5m en X y Z
-                              final double px = (center.dx + (x / 5.0) * (w * 0.42))
-                                  .clamp(24.0, w - 24.0);
-                              final double py = (center.dy + (z / 5.0) * (h * 0.42))
-                                  .clamp(24.0, h - 24.0);
+                              final double px =
+                                  (center.dx + (x / 5.0) * (w * 0.42))
+                                      .clamp(24.0, w - 24.0);
+                              final double py =
+                                  (center.dy + (z / 5.0) * (h * 0.42))
+                                      .clamp(24.0, h - 24.0);
 
                               final bool esResuelto =
                                   rep['estado'] == 'Resuelto';
                               final Color color = esResuelto
-                                  ? const Color(0xFF94A3B8)
+                                  ? const Color(0xFF0D9488)
                                   : _colorPorTipo(rep['tipo']);
                               final bool seleccionado =
                                   _reporteSeleccionadoPlano?['reporteId'] ==
@@ -1143,7 +1456,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                                 top: py - 18,
                                 child: Tooltip(
                                   message:
-                                      '${rep['tipo']}\n${rep['descripcion']}\n[X:$x, Y:$y, Z:$z]',
+                                      '${rep['tipo']}\nReportó: ${rep['creado_por_correo'] ?? 'Alumno'}\n${rep['descripcion']}\n[X:$x, Y:$y, Z:$z]',
                                   child: InkWell(
                                     onTap: () => setState(() =>
                                         _reporteSeleccionadoPlano = rep),
@@ -1161,7 +1474,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                                         ),
                                         boxShadow: [
                                           BoxShadow(
-                                            color: color.withOpacity(0.35),
+                                            color:
+                                                color.withValues(alpha: 0.35),
                                             blurRadius: seleccionado ? 12 : 6,
                                             spreadRadius: seleccionado ? 2 : 0,
                                           ),
@@ -1179,17 +1493,15 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                                 ),
                               );
                             }),
-
-                            // Tarjeta flotante cuando se selecciona un pin en el plano
                             if (_reporteSeleccionadoPlano != null)
                               Positioned(
                                 right: 12,
                                 bottom: 12,
                                 child: Container(
-                                  width: 290,
+                                  width: 300,
                                   padding: const EdgeInsets.all(14),
                                   decoration: BoxDecoration(
-                                    color: Colors.white.withOpacity(0.96),
+                                    color: Colors.white.withValues(alpha: 0.96),
                                     borderRadius: BorderRadius.circular(14),
                                     border: Border.all(
                                         color: UaqFixDashboardApp.borderBlue),
@@ -1242,12 +1554,13 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                                         maxLines: 2,
                                         overflow: TextOverflow.ellipsis,
                                       ),
-                                      const SizedBox(height: 6),
+                                      const SizedBox(height: 4),
                                       Text(
-                                        'Nodo: ${_nombreAmigableZona(_reporteSeleccionadoPlano!['ubicacion_qr'])}',
+                                        'Alumno: ${_reporteSeleccionadoPlano!['creado_por_correo'] ?? 'alumnos.uaq.mx'}',
                                         style: const TextStyle(
                                           fontSize: 11,
-                                          color: UaqFixDashboardApp.textMuted,
+                                          color: UaqFixDashboardApp.primaryBlue,
+                                          fontWeight: FontWeight.w600,
                                         ),
                                       ),
                                       if ((_reporteSeleccionadoPlano![
@@ -1261,19 +1574,18 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                                           child: ElevatedButton.icon(
                                             style: ElevatedButton.styleFrom(
                                               backgroundColor:
-                                                  UaqFixDashboardApp
-                                                      .primaryBlue,
+                                                  const Color(0xFF0D9488),
                                               foregroundColor: Colors.white,
                                               elevation: 0,
                                             ),
                                             onPressed: () =>
-                                                _marcarComoResuelto(
+                                                _abrirDialogoResolverConEvidencia(
                                                     _reporteSeleccionadoPlano!),
                                             icon: const Icon(
-                                                Icons.check_circle_outline,
+                                                Icons.fact_check_outlined,
                                                 size: 14),
                                             label: const Text(
-                                              'Marcar Resuelto',
+                                              'Resolver y Enviar Evidencia',
                                               style: TextStyle(fontSize: 11.5),
                                             ),
                                           ),
@@ -1294,8 +1606,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           ),
         ),
         const SizedBox(width: 20),
-
-        // Panel Derecho: Distribución por Categoría y por Zona
         Expanded(
           flex: 4,
           child: Container(
@@ -1335,7 +1645,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                 const SizedBox(height: 14),
                 _barraCategoria(
                     'Riesgo Crítico (Industria 4.0)', const Color(0xFFDC2626)),
-                const Divider(height: 32, color: UaqFixDashboardApp.borderSlate),
+                const Divider(height: 28, color: UaqFixDashboardApp.borderSlate),
                 const Text(
                   'Incidencias por Ubicación QR',
                   style: TextStyle(
@@ -1344,7 +1654,10 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                     color: UaqFixDashboardApp.textDark,
                   ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
+                _resumenZonaRow(
+                    'qr_stand_proyectate_1', 'Stand Proyéctate 1 (Feria)'),
+                const SizedBox(height: 8),
                 _resumenZonaRow('qr_salon_3_piso_2', 'Aula de Cómputo 3 (FIF)'),
                 const SizedBox(height: 8),
                 _resumenZonaRow(
@@ -1446,7 +1759,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     );
   }
 
-  // Sección de Bitácora y Tabla de Reportes con Buscador y Acciones
   Widget _buildSeccionTablaReportes() {
     final lista = _reportesFiltrados;
 
@@ -1460,7 +1772,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Encabezado y controles de filtrado
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -1468,7 +1779,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Bitácora de Incidencias y Coordenadas 3D',
+                    'Bitácora de Incidencias, Autoría y Evidencia de Mantenimiento',
                     style: TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.w800,
@@ -1476,7 +1787,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                     ),
                   ),
                   Text(
-                    'Administración en tiempo real conectada con los visores móviles AR',
+                    'Trazabilidad completa: Alumno solicitante (@alumnos.uaq.mx) y Técnico resolutor (@mantenimiento.uaq.mx)',
                     style: TextStyle(
                       fontSize: 12,
                       color: UaqFixDashboardApp.textMuted,
@@ -1486,7 +1797,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
               ),
               Row(
                 children: [
-                  // Buscador
                   SizedBox(
                     width: 240,
                     height: 40,
@@ -1494,7 +1804,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                       onChanged: (val) => setState(() => _busqueda = val),
                       style: const TextStyle(fontSize: 13),
                       decoration: InputDecoration(
-                        hintText: 'Buscar por falla o nodo...',
+                        hintText: 'Buscar por falla, correo o nodo...',
                         prefixIcon: const Icon(Icons.search_rounded, size: 18),
                         filled: true,
                         fillColor: UaqFixDashboardApp.bgSlate,
@@ -1514,7 +1824,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                     ),
                   ),
                   const SizedBox(width: 12),
-                  // Filtro Estado
                   _chipEstado('Todos'),
                   const SizedBox(width: 6),
                   _chipEstado('Pendiente'),
@@ -1525,7 +1834,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
             ],
           ),
           const SizedBox(height: 20),
-
           if (_cargando && lista.isEmpty)
             const Padding(
               padding: EdgeInsets.all(40),
@@ -1587,7 +1895,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     );
   }
 
-  Widget _filaReporteItem(Map<String, dynamic> rep) {
+  Widget _filaReporteItem(ReporteMap rep) {
     final String tipo = (rep['tipo'] ?? 'General').toString();
     final String desc = (rep['descripcion'] ?? 'Sin descripción').toString();
     final String qr = (rep['ubicacion_qr'] ?? '').toString();
@@ -1596,35 +1904,39 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     final coords = rep['coordenadas_ar'] ?? {'x': 0, 'y': 0, 'z': 0};
     final Color color = _colorPorTipo(tipo);
 
+    final String autorNombre =
+        (rep['creado_por_nombre'] ?? 'Estudiante UAQ').toString();
+    final String autorCorreo =
+        (rep['creado_por_correo'] ?? 'alumnos.uaq.mx').toString();
+    final String? evidencia = rep['evidencia_resolucion']?.toString();
+    final String? tecNombre = rep['resuelto_por_nombre']?.toString();
+
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
       decoration: BoxDecoration(
         color: esPendiente
             ? UaqFixDashboardApp.cardWhite
-            : UaqFixDashboardApp.bgSlate,
+            : const Color(0xFFF8FAFC),
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
           color: esPendiente
               ? UaqFixDashboardApp.borderSlate
-              : const Color(0xFFE2E8F0),
+              : const Color(0xFFCCFBF1),
         ),
       ),
       child: Row(
         children: [
-          // Icono de categoría
           Container(
             width: 42,
             height: 42,
             decoration: BoxDecoration(
-              color: color.withOpacity(0.12),
+              color: color.withValues(alpha: 0.12),
               borderRadius: BorderRadius.circular(12),
             ),
             child: Icon(_iconoPorTipo(tipo), color: color, size: 20),
           ),
           const SizedBox(width: 16),
-
-          // Descripción y categoría
           Expanded(
             flex: 4,
             child: Column(
@@ -1653,19 +1965,35 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                 const SizedBox(height: 4),
                 Text(
                   desc,
-                  style: TextStyle(
+                  style: const TextStyle(
                     fontSize: 14,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: FontWeight.w700,
                     color: UaqFixDashboardApp.textDark,
-                    decoration:
-                        esPendiente ? null : TextDecoration.lineThrough,
                   ),
                 ),
+                const SizedBox(height: 3),
+                Text(
+                  'Reportó: $autorNombre ($autorCorreo)',
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    color: UaqFixDashboardApp.textMuted,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if (!esPendiente && evidencia != null) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Atendió ${tecNombre ?? "Mantenimiento"}: "$evidencia"',
+                    style: const TextStyle(
+                      fontSize: 11.5,
+                      color: Color(0xFF0F766E),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
-
-          // Ubicación QR
           Expanded(
             flex: 3,
             child: Row(
@@ -1698,8 +2026,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
               ],
             ),
           ),
-
-          // Coordenadas 3D
           Expanded(
             flex: 2,
             child: Container(
@@ -1720,37 +2046,35 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
             ),
           ),
           const SizedBox(width: 16),
-
-          // Estado y Botón de Acción
           SizedBox(
-            width: 175,
+            width: 185,
             child: Align(
               alignment: Alignment.centerRight,
               child: esPendiente
                   ? ElevatedButton.icon(
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: UaqFixDashboardApp.primaryBlue,
+                        backgroundColor: const Color(0xFF0D9488),
                         foregroundColor: Colors.white,
                         elevation: 0,
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 14, vertical: 10),
+                            horizontal: 12, vertical: 10),
                         shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(10)),
                       ),
-                      onPressed: () => _marcarComoResuelto(rep),
-                      icon: const Icon(Icons.check_circle_outline_rounded,
-                          size: 16),
+                      onPressed: () => _abrirDialogoResolverConEvidencia(rep),
+                      icon: const Icon(Icons.fact_check_outlined, size: 16),
                       label: const Text(
-                        'Resolver Pin',
+                        'Resolver + Evidencia',
                         style: TextStyle(
-                            fontSize: 12, fontWeight: FontWeight.w700),
+                            fontSize: 11.5, fontWeight: FontWeight.w700),
                       ),
                     )
                   : Container(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 12, vertical: 6),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF0D9488).withOpacity(0.12),
+                        color:
+                            const Color(0xFF0D9488).withValues(alpha: 0.12),
                         borderRadius: BorderRadius.circular(20),
                       ),
                       child: const Row(
@@ -1760,9 +2084,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                               size: 15, color: Color(0xFF0D9488)),
                           SizedBox(width: 6),
                           Text(
-                            'Resuelto',
+                            'Evidencia Enviada',
                             style: TextStyle(
-                              fontSize: 12,
+                              fontSize: 11.5,
                               fontWeight: FontWeight.w700,
                               color: Color(0xFF0D9488),
                             ),
@@ -1778,7 +2102,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   }
 }
 
-// Pintor del Plano Arquitectónico / Cuadrícula Espacial 3D
 class _PlanoArquitectonicoPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
@@ -1799,7 +2122,6 @@ class _PlanoArquitectonicoPainter extends CustomPainter {
 
     final center = Offset(size.width / 2, size.height / 2);
 
-    // Anillos de distancia radial (1.5m, 3.0m, 4.5m)
     final circlePaint = Paint()
       ..color = const Color(0xFFCBD5E1)
       ..style = PaintingStyle.stroke
@@ -1808,7 +2130,6 @@ class _PlanoArquitectonicoPainter extends CustomPainter {
     canvas.drawCircle(center, size.height * 0.18, circlePaint);
     canvas.drawCircle(center, size.height * 0.34, circlePaint);
 
-    // Ejes centrales X y Z
     final axisPaint = Paint()
       ..color = const Color(0xFF94A3B8)
       ..strokeWidth = 1.2;
