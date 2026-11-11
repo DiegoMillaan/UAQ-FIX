@@ -697,9 +697,12 @@ class HomeScannerScreen extends StatefulWidget {
 
 class _HomeScannerScreenState extends State<HomeScannerScreen>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
-  MobileScannerController? _scannerController;
+  late final MobileScannerController _scannerController;
   bool _navegando = false;
-  bool _escanerActivo = true;
+  bool _escanerActivo = false;
+  bool _cargandoCamara = true;
+  bool _operacionCamaraEnCurso = false;
+  String? _errorCamara;
   late AnimationController _pulseController;
 
   List<ReporteMap> _misReportes = [];
@@ -714,12 +717,101 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
       vsync: this,
       duration: const Duration(milliseconds: 1800),
     )..repeat(reverse: true);
-    _inicializarEscaner();
-    _cargarMisNotificaciones();
 
+    // Un único controlador para toda la vida de la pantalla; controlamos start/stop manualmente
+    _scannerController = MobileScannerController(
+      detectionSpeed: DetectionSpeed.normal,
+      facing: CameraFacing.back,
+      autoStart: false,
+    );
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _iniciarEscaner();
+    });
+
+    _cargarMisNotificaciones();
     _notifTimer = Timer.periodic(const Duration(seconds: 12), (_) {
       _cargarMisNotificaciones(silencioso: true);
     });
+  }
+
+  String _traducirErrorCamara(MobileScannerException e) {
+    switch (e.errorCode) {
+      case MobileScannerErrorCode.permissionDenied:
+        return "Permiso de cámara denegado. Actívalo en los ajustes del sistema y presiona Reintentar.";
+      case MobileScannerErrorCode.unsupported:
+        return "Este dispositivo no soporta el escaneo por cámara.";
+      default:
+        return "La cámara tardó en responder (${e.errorCode.name}). Presiona Reintentar para abrir el lente.";
+    }
+  }
+
+  /// Inicia o reanuda el mismo controlador sin destruir el widget MobileScanner
+  Future<void> _iniciarEscaner() async {
+    if (_navegando || _operacionCamaraEnCurso || !mounted) return;
+    _operacionCamaraEnCurso = true;
+
+    setState(() {
+      _cargandoCamara = true;
+      _errorCamara = null;
+    });
+
+    try {
+      await _scannerController.start();
+      if (mounted) {
+        setState(() {
+          _escanerActivo = true;
+          _cargandoCamara = false;
+          _errorCamara = null;
+        });
+      }
+    } on MobileScannerException catch (e) {
+      if (mounted) {
+        setState(() {
+          _escanerActivo = false;
+          _cargandoCamara = false;
+          _errorCamara = _traducirErrorCamara(e);
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _escanerActivo = false;
+          _cargandoCamara = false;
+          _errorCamara =
+              "No se pudo inicializar la cámara. Verifica permisos y presiona Reintentar.";
+        });
+      }
+    } finally {
+      _operacionCamaraEnCurso = false;
+    }
+  }
+
+  /// Pausa el controlador liberando CameraX sin destruir la instancia
+  Future<void> _pausarEscaner() async {
+    while (_operacionCamaraEnCurso) {
+      await Future.delayed(const Duration(milliseconds: 40));
+    }
+    if (!mounted) return;
+    _operacionCamaraEnCurso = true;
+    try {
+      await _scannerController.stop();
+    } catch (_) {}
+    if (mounted) {
+      setState(() {
+        _escanerActivo = false;
+      });
+    }
+    _operacionCamaraEnCurso = false;
+  }
+
+  /// Pausa y reanuda el mismo controlador cuando el usuario pulsa recargar
+  Future<void> _reiniciarEscanerLimpio() async {
+    if (_navegando || _operacionCamaraEnCurso || !mounted) return;
+    await _pausarEscaner();
+    await Future.delayed(const Duration(milliseconds: 180));
+    if (!mounted || _navegando) return;
+    await _iniciarEscaner();
   }
 
   Future<void> _cargarMisNotificaciones({bool silencioso = false}) async {
@@ -742,25 +834,15 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
     }
   }
 
-  void _inicializarEscaner() {
-    _scannerController?.dispose();
-    _scannerController = MobileScannerController(
-      detectionSpeed: DetectionSpeed.normal,
-      facing: CameraFacing.back,
-    );
-    if (mounted) {
-      setState(() => _escanerActivo = true);
-    }
-  }
-
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (_navegando) return;
-    if (state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.paused) {
-      _scannerController?.stop();
+    if (_navegando || !mounted) return;
+    if (state == AppLifecycleState.paused) {
+      _pausarEscaner();
     } else if (state == AppLifecycleState.resumed) {
-      _inicializarEscaner();
+      if (!_escanerActivo && !_operacionCamaraEnCurso) {
+        _iniciarEscaner();
+      }
     }
   }
 
@@ -783,16 +865,10 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
     if (_navegando) return;
     setState(() {
       _navegando = true;
-      _escanerActivo = false;
     });
 
-    try {
-      await _scannerController?.stop();
-      await _scannerController?.dispose();
-      _scannerController = null;
-    } catch (_) {}
-
-    await Future.delayed(const Duration(milliseconds: 200));
+    await _pausarEscaner();
+    await Future.delayed(const Duration(milliseconds: 180));
 
     if (!mounted) return;
     await Navigator.push(
@@ -825,11 +901,11 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
       ),
     );
 
-    await Future.delayed(const Duration(milliseconds: 300));
     if (mounted) {
-      _inicializarEscaner();
-      _cargarMisNotificaciones(silencioso: true);
       setState(() => _navegando = false);
+      _cargarMisNotificaciones(silencioso: true);
+      await Future.delayed(const Duration(milliseconds: 180));
+      await _iniciarEscaner();
     }
   }
 
@@ -875,7 +951,6 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
                           ),
                         ),
                       ),
-                      // Encabezado con Expanded para evitar overflow de 90px
                       Padding(
                         padding: const EdgeInsets.fromLTRB(20, 16, 12, 12),
                         child: Row(
@@ -1151,7 +1226,7 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
     _notifTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _pulseController.dispose();
-    _scannerController?.dispose();
+    _scannerController.dispose();
     super.dispose();
   }
 
@@ -1308,21 +1383,71 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    if (_escanerActivo && _scannerController != null)
-                      MobileScanner(
-                        controller: _scannerController!,
-                        onDetect: (capture) {
-                          for (final barcode in capture.barcodes) {
-                            final String? code = barcode.rawValue;
-                            if (code != null && code.isNotEmpty) {
-                              _abrirEspacioAR(
-                                  code, _obtenerTituloAmigableQr(code));
-                              break;
-                            }
+                    // El widget MobileScanner permanece siempre montado con el controlador único
+                    MobileScanner(
+                      controller: _scannerController,
+                      onDetect: (capture) {
+                        if (_navegando || !_escanerActivo) return;
+                        for (final barcode in capture.barcodes) {
+                          final String? code = barcode.rawValue;
+                          if (code != null && code.isNotEmpty) {
+                            _abrirEspacioAR(
+                                code, _obtenerTituloAmigableQr(code));
+                            break;
                           }
-                        },
+                        }
+                      },
+                    ),
+                    if (_errorCamara != null)
+                      Container(
+                        color: const Color(0xFF0F172A),
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.videocam_off_rounded,
+                                color: Color(0xFFF87171),
+                                size: 38,
+                              ),
+                              const SizedBox(height: 10),
+                              Text(
+                                _errorCamara!,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              const SizedBox(height: 14),
+                              ElevatedButton.icon(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: UaqFixApp.primaryBlue,
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 16, vertical: 10),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                                onPressed: _reiniciarEscanerLimpio,
+                                icon: const Icon(Icons.refresh_rounded,
+                                    size: 18),
+                                label: const Text(
+                                  "Reintentar cámara",
+                                  style: TextStyle(
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       )
-                    else
+                    else if (_cargandoCamara || !_escanerActivo)
                       Container(
                         color: const Color(0xFF0F172A),
                         child: const Center(
@@ -1335,7 +1460,7 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
                               ),
                               SizedBox(height: 12),
                               Text(
-                                "Activando visor espacial AR...",
+                                "Activando cámara QR...",
                                 style: TextStyle(
                                   color: Colors.white70,
                                   fontSize: 12,
@@ -1346,42 +1471,69 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
                           ),
                         ),
                       ),
-                    Container(color: Colors.black.withValues(alpha: 0.18)),
-                    Center(
-                      child: AnimatedBuilder(
-                        animation: _pulseController,
-                        builder: (context, child) {
-                          final scale = 1.0 + (_pulseController.value * 0.03);
-                          return Transform.scale(
-                            scale: scale,
-                            child: Container(
-                              width: 195,
-                              height: 195,
-                              decoration: BoxDecoration(
-                                border: Border.all(
-                                  color: Colors.white.withValues(alpha: 0.95),
-                                  width: 2.2,
-                                ),
-                                borderRadius: BorderRadius.circular(24),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: UaqFixApp.primaryBlue
-                                        .withValues(alpha: 0.25),
-                                    blurRadius: 20,
-                                    spreadRadius: 2,
+                    if (_errorCamara == null) ...[
+                      IgnorePointer(
+                        child: Container(
+                            color: Colors.black.withValues(alpha: 0.18)),
+                      ),
+                      Center(
+                        child: GestureDetector(
+                          onTap: _reiniciarEscanerLimpio,
+                          child: AnimatedBuilder(
+                            animation: _pulseController,
+                            builder: (context, child) {
+                              final scale =
+                                  1.0 + (_pulseController.value * 0.03);
+                              return Transform.scale(
+                                scale: scale,
+                                child: Container(
+                                  width: 195,
+                                  height: 195,
+                                  decoration: BoxDecoration(
+                                    border: Border.all(
+                                      color:
+                                          Colors.white.withValues(alpha: 0.95),
+                                      width: 2.2,
+                                    ),
+                                    borderRadius: BorderRadius.circular(24),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: UaqFixApp.primaryBlue
+                                            .withValues(alpha: 0.25),
+                                        blurRadius: 20,
+                                        spreadRadius: 2,
+                                      ),
+                                    ],
                                   ),
-                                ],
-                              ),
-                              child: const Center(
-                                child: Icon(
-                                  Icons.qr_code_scanner_rounded,
-                                  color: Colors.white70,
-                                  size: 36,
+                                  child: const Center(
+                                    child: Icon(
+                                      Icons.qr_code_scanner_rounded,
+                                      color: Colors.white70,
+                                      size: 36,
+                                    ),
+                                  ),
                                 ),
-                              ),
-                            ),
-                          );
-                        },
+                              );
+                            },
+                          ),
+                        ),
+                      ),
+                    ],
+                    Positioned(
+                      top: 12,
+                      right: 12,
+                      child: Material(
+                        color: Colors.black.withValues(alpha: 0.45),
+                        shape: const CircleBorder(),
+                        child: IconButton(
+                          tooltip: "Recargar cámara QR",
+                          icon: const Icon(
+                            Icons.refresh_rounded,
+                            color: Colors.white,
+                            size: 20,
+                          ),
+                          onPressed: _reiniciarEscanerLimpio,
+                        ),
                       ),
                     ),
                     Positioned(
@@ -1449,7 +1601,6 @@ class _HomeScannerScreenState extends State<HomeScannerScreen>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Fila con Expanded para eliminar el overflow de 81px
                   Row(
                     children: [
                       Container(
